@@ -250,3 +250,60 @@ class TestAnnotateSegment(unittest.TestCase):
         self.assertEqual(len(episode["rows"]), 2)
         self.assertEqual(episode["rows"][0]["timestamp"], "2026-03-14T17:23:01Z")
         self.assertEqual(episode["rows"][1]["timestamp"], "2026-03-14T17:23:03Z")
+
+
+class TestWriteOutput(unittest.TestCase):
+
+    def _make_episode(self, outcome="UP", hour=17, day=5):
+        return {
+            "outcome": outcome,
+            "hour": hour,
+            "day": day,
+            "start_price": 70679.78,
+            "end_price": 70694.50,
+            "rows": [
+                _make_parsed_row("2026-03-14T17:23:01Z"),
+                _make_parsed_row("2026-03-14T17:24:59Z", time_to_close=1592),
+            ],
+        }
+
+    def test_output_is_parseable_json_per_block(self):
+        episodes = [self._make_episode("UP"), self._make_episode("DOWN")]
+        text = combine_tsv.format_output(episodes)
+        blocks = text.strip().split("\n\n")
+        self.assertEqual(len(blocks), 2)
+        parsed = json.loads(blocks[0])
+        self.assertEqual(parsed["outcome"], "UP")
+
+    def test_each_row_on_its_own_line(self):
+        episodes = [self._make_episode()]
+        text = combine_tsv.format_output(episodes)
+        block = text.strip().split("\n\n")[0]
+        lines = block.split("\n")
+        # First line: opening brace with metadata and rows:[
+        # Middle lines: one row dict each
+        # Last line: closing ]}
+        self.assertIn('"outcome"', lines[0])
+        self.assertIn('"timestamp"', lines[1])  # first row
+        self.assertIn('"timestamp"', lines[2])  # second row
+
+    def test_no_blank_lines_within_episode(self):
+        episodes = [self._make_episode()]
+        text = combine_tsv.format_output(episodes)
+        block = text.strip().split("\n\n")[0]
+        self.assertNotIn("\n\n", block)
+
+    def test_episodes_separated_by_exactly_one_blank_line(self):
+        episodes = [self._make_episode(), self._make_episode(), self._make_episode()]
+        text = combine_tsv.format_output(episodes)
+        # Should be exactly 2 blank-line separators for 3 episodes
+        self.assertEqual(text.count("\n\n"), 2)
+
+    def test_outcome_and_metadata_in_output(self):
+        episodes = [self._make_episode("DOWN", hour=9, day=0)]
+        text = combine_tsv.format_output(episodes)
+        parsed = json.loads(text.strip().split("\n\n")[0])
+        self.assertEqual(parsed["outcome"], "DOWN")
+        self.assertEqual(parsed["hour"], 9)
+        self.assertEqual(parsed["day"], 0)
+        self.assertAlmostEqual(parsed["start_price"], 70679.78)

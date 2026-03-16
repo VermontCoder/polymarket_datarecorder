@@ -93,3 +93,28 @@ def annotate_segment(rows: list[dict]) -> dict:
         "end_price":   last["current_price"],
         "rows":        rows,
     }
+
+
+def format_episode(episode: dict) -> str:
+    """
+    Serialize one episode to a string.
+    Opening line: JSON object with metadata and 'rows':[
+    Middle lines: one row JSON object per line (comma-separated)
+    Closing line: ]}
+    No blank lines within the block.
+    """
+    rows = episode["rows"]
+    meta = {k: v for k, v in episode.items() if k != "rows"}
+    # Build opening line: {"outcome":"UP","hour":17,...,"rows":[
+    opening = json.dumps(meta, separators=(",", ":"))[:-1] + ',"rows":['
+    row_lines = []
+    for i, row in enumerate(rows):
+        suffix = "," if i < len(rows) - 1 else ""
+        row_lines.append(json.dumps(row, separators=(",", ":")) + suffix)
+    closing = "]}"
+    return "\n".join([opening] + row_lines + [closing])
+
+
+def format_output(episodes: list[dict]) -> str:
+    """Serialize all episodes separated by a single blank line."""
+    return "\n\n".join(format_episode(ep) for ep in episodes)
