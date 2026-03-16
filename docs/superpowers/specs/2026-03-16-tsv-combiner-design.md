@@ -114,21 +114,26 @@ This works because no blank lines appear within any episode block — the only `
 Printed to stdout on completion:
 
 ```
-─────────────────────────────────────
+─────────────────────────────────────────────────────────────────
 Combined: btc_polymarket_combined.json
-─────────────────────────────────────
+─────────────────────────────────────────────────────────────────
 Episodes written:     142
 Dropped (no close):    12
-Date range:           2026-03-14T17:22:59Z → 2026-03-16T13:40:01Z
 Processing time:      1.3s
-─────────────────────────────────────
+
+Date ranges by source file:
+  btc_polymarket_20260314_132259.tsv   2026-03-14T17:22:59Z → 2026-03-14T23:59:51Z
+  btc_polymarket_20260314_210528.tsv   2026-03-14T21:05:28Z → 2026-03-15T03:12:44Z
+  btc_polymarket_20260315_210627.tsv   2026-03-15T21:06:27Z → 2026-03-16T04:00:03Z
+  btc_polymarket_20260316_093828.tsv   2026-03-16T09:38:29Z → 2026-03-16T13:40:01Z
+─────────────────────────────────────────────────────────────────
 ```
 
 Fields:
 - **Episodes written**: count of valid segments written to the output file
 - **Dropped (no close)**: count of segments discarded because no row had `time_to_close < 15000`
-- **Date range**: `timestamp` of the first row of the first written episode → `timestamp` of the last row of the last written episode, as ISO 8601 UTC strings
 - **Processing time**: wall-clock seconds from script start to file write complete
+- **Date ranges by source file**: for each TSV file, the `timestamp` of its first row → `timestamp` of its last row, as ISO 8601 UTC strings. One line per file, showing coverage and gaps between sessions at a glance.
 
 ---
 
