@@ -12,16 +12,24 @@ Each 5-minute market period becomes one **episode** — a JSON object containing
 
 ---
 
+## Assumptions
+
+- TSV files are **non-overlapping** in time. Each file represents a separate, non-concurrent recording session. If two sessions recorded the same moment, results are undefined.
+- Within a single recording session there are **no gaps** in the data — the only discontinuities are at the start (session may begin mid-period) and at the end (session may be cut off before a period closes).
+
+---
+
 ## Input
 
 - Source directory: `tsv/`
 - File pattern: `btc_polymarket_*.tsv`
-- Files are sorted alphabetically (filenames encode datetime, so alphabetical = chronological)
+- Files are sorted alphabetically — filenames follow the pattern `btc_polymarket_YYYYMMDD_HHMMSS.tsv`, so alphabetical order is guaranteed to be chronological
 - Each TSV has a header row:
   ```
   Timestamp  Up Bid  Up Ask  Down Bid  Down Ask  Price to Beat  Current Price  Difference %  Difference $  Time to Close (ms)
   ```
 - Polling interval: ~2 seconds; a full 5-minute window yields ~150 rows
+- If no files match the glob, the script exits with a clear error message and a non-zero exit code
 
 ---
 
@@ -36,28 +44,34 @@ Parse each row into a dict with snake_case keys:
 timestamp, up_bid, up_ask, down_bid, down_ask,
 price_to_beat, current_price, diff_pct, diff_usd, time_to_close
 ```
-All numeric fields stored as `float`. `time_to_close` stored as `int`.
+All numeric fields stored as `float`. `time_to_close` stored as `int` via truncation (`int(float(value))`).
 
 ### 3. Segment
-Group consecutive rows into segments by detecting changes in `price_to_beat`. When `price_to_beat` changes between two adjacent rows, the prior segment ends and a new one begins.
+Group consecutive rows into segments by detecting changes in `price_to_beat`.
 
-> Rationale: `price_to_beat` is fetched fresh from the Binance opening price at the start of each 5-minute window and is constant within a window — it is the most reliable boundary signal.
+**Boundary rule:** when row N and row N+1 have different `price_to_beat` values, row N is the **last row of the current segment** and row N+1 is the **first row of the next segment**. The row with the new `price_to_beat` always belongs to the new segment — it is never included in the closing segment.
+
+> Rationale: `price_to_beat` is fetched from Binance at the start of each 5-minute window and is constant throughout. A change in this value is an unambiguous market-window boundary.
+
+**Consequence for `end_price`:** The closing row of a segment (the last row with the *old* `price_to_beat`) reflects the final observed price within that market period. This is the settlement-equivalent price used to determine the outcome.
 
 ### 4. Filter (completeness)
-Discard any segment where no row has `time_to_close < 15000` (15 seconds).
+Discard any segment where no row has `time_to_close < 15000` (15 seconds remaining).
 
-- **Kept:** segment has a row confirming the near-close price — outcome is knowable
+- **Kept:** segment has a near-close row — outcome is knowable from the final observed price
 - **Dropped:** recording cut off before the window closed — outcome is unknown
 
-Partial-start segments (recording began mid-period) are **kept** as long as they satisfy the close condition. The agent simply starts making decisions from wherever the data begins.
+Partial-start segments (recording began mid-period) are **kept** as long as they satisfy the close condition. No minimum row count is required — the agent simply starts making decisions from wherever the data begins. This is intentional: partial-start segments are valid training episodes.
 
 ### 5. Annotate
 For each valid segment:
-- `outcome`: `"UP"` if last row's `current_price > price_to_beat`, else `"DOWN"`
+- `outcome`: `"UP"` if last row's `current_price > price_to_beat`, else `"DOWN"`. An exact tie (`current_price == price_to_beat`) is treated as `"DOWN"` — this is intentional and consistent with how Polymarket resolves the market.
 - `start_price`: the segment's `price_to_beat` value
-- `end_price`: `current_price` from the last row
-- `hour`: 0–23, derived from the first row's UTC timestamp
-- `day`: 0–6 (Monday=0, Sunday=6), derived from the first row's UTC timestamp
+- `end_price`: `current_price` from the last row in the segment (i.e., the last row with the old `price_to_beat`, per the boundary rule above)
+- `hour`: integer 0–23, from `datetime.fromisoformat(timestamp).hour` (UTC)
+- `day`: integer 0–6 (Monday=0, Sunday=6), from `datetime.fromisoformat(timestamp).weekday()` (UTC)
+
+> Note: for partial-start segments, `hour` and `day` are derived from the first *captured* row, not the true market window open. The hour and day are the same as the true window open since the window is only 5 minutes, so this is correct.
 
 ### 6. Write
 Emit episodes to `btc_polymarket_combined.json` in the project root.
@@ -66,7 +80,7 @@ Emit episodes to `btc_polymarket_combined.json` in the project root.
 
 ## Output Format
 
-One JSON object per episode. Episodes separated by a blank line. Each row in the `rows` array appears on its own line for human readability. The file is valid JSON when each episode block is parsed individually.
+One JSON object per episode. Episodes separated by **exactly one blank line** (`\n\n` between episodes). Each row in the `rows` array appears on its own line. **No blank lines appear within a single episode block.**
 
 ```json
 {"outcome":"UP","hour":17,"day":4,"start_price":70679.78,"end_price":70720.10,"rows":[
@@ -87,6 +101,8 @@ with open("btc_polymarket_combined.json") as f:
 episodes = [json.loads(block) for block in content.strip().split("\n\n")]
 ```
 
+This works because no blank lines appear within any episode block — the only `\n\n` sequences in the file are the episode separators.
+
 ---
 
 ## Console Stats Output
@@ -98,16 +114,16 @@ Printed to stdout on completion:
 Combined: btc_polymarket_combined.json
 ─────────────────────────────────────
 Episodes written:     142
-Truncated (dropped):   12
+Dropped (no close):    12
 Date range:           2026-03-14T17:22:59Z → 2026-03-16T13:40:01Z
 Processing time:      1.3s
 ─────────────────────────────────────
 ```
 
 Fields:
-- **Episodes written**: count of valid episodes in the output file
-- **Truncated (dropped)**: count of segments discarded due to missing close confirmation
-- **Date range**: first timestamp of first episode → last timestamp of last episode
+- **Episodes written**: count of valid segments written to the output file
+- **Dropped (no close)**: count of segments discarded because no row had `time_to_close < 15000`
+- **Date range**: `timestamp` of the first row of the first written episode → `timestamp` of the last row of the last written episode, as ISO 8601 UTC strings
 - **Processing time**: wall-clock seconds from script start to file write complete
 
 ---
@@ -120,14 +136,18 @@ Using Python's built-in `unittest`. The script imports processing functions dire
 
 | Test | Description |
 |------|-------------|
-| `test_segment_boundary` | Two rows with different `price_to_beat` → split into 2 segments |
+| `test_segment_boundary` | Two rows with different `price_to_beat` → second row starts a new segment, not appended to first |
 | `test_no_boundary_same_price` | Two rows with same `price_to_beat` → one segment |
+| `test_boundary_row_belongs_to_new_segment` | Boundary row (first row with new `price_to_beat`) is in the new segment; old segment's last row has the old `price_to_beat` |
 | `test_truncation_filter_drop` | Segment with no row having `time_to_close < 15000` → dropped |
 | `test_truncation_filter_keep` | Segment with one row having `time_to_close = 8000` → kept |
 | `test_outcome_up` | Last row `current_price > price_to_beat` → `"UP"` |
 | `test_outcome_down` | Last row `current_price < price_to_beat` → `"DOWN"` |
+| `test_end_price_is_last_old_regime_row` | `end_price` equals `current_price` of last row before `price_to_beat` changes |
 | `test_hour_annotation` | Timestamp `2026-03-14T17:23:01Z` → `hour=17` |
 | `test_day_annotation` | Timestamp `2026-03-14T17:23:01Z` → `day=5` (Saturday) |
+| `test_no_files_error` | Empty `tsv/` directory → script exits with non-zero code and clear error message |
+| `test_output_no_blank_lines_within_episode` | No `\n\n` appears within any single episode block in the output |
 
 ### Integration / spot-check tests
 
@@ -137,7 +157,7 @@ Load the actual combined output file and verify known episodes from the source T
 |------|-------------|----------------|-----------------|
 | `test_spot_episode_1` | `btc_polymarket_20260314_132259.tsv` | First complete segment starting ~17:25 UTC | `outcome`, `start_price`, `end_price`, `hour=17`, `day=5` |
 | `test_spot_episode_2` | `btc_polymarket_20260315_210627.tsv` | First complete segment in that file | `outcome`, `hour`, `day=6` (Sunday) |
-| `test_spot_episode_3` | `btc_polymarket_20260316_093828.tsv` | Last complete segment | `outcome`, correct `end_price` matches last TSV row |
+| `test_spot_episode_3` | `btc_polymarket_20260316_093828.tsv` | Last complete segment | `outcome`, correct `end_price` matches last TSV row's `current_price` |
 
 Spot-check tests are skipped automatically if `btc_polymarket_combined.json` does not exist (they require the combiner to have been run first).
 
@@ -155,6 +175,6 @@ Spot-check tests are skipped automatically if `btc_polymarket_combined.json` doe
 
 ## Out of Scope
 
-- Deduplication of rows that appear in multiple TSV files (not expected based on file naming)
+- Deduplication of rows across TSV files (source files are assumed non-overlapping)
 - Timezone conversion (all timestamps remain UTC)
 - Streaming/incremental output (full reprocess each run)
