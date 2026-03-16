@@ -47,13 +47,17 @@ price_to_beat, current_price, diff_pct, diff_usd, time_to_close
 All numeric fields stored as `float`. `time_to_close` stored as `int` via truncation (`int(float(value))`).
 
 ### 3. Segment
-Group consecutive rows into segments by detecting changes in `price_to_beat`.
+Group consecutive rows into segments using the **timestamp-based window key**:
 
-**Boundary rule:** when row N and row N+1 have different `price_to_beat` values, row N is the **last row of the current segment** and row N+1 is the **first row of the next segment**. The row with the new `price_to_beat` always belongs to the new segment — it is never included in the closing segment.
+```python
+window_key = (year, month, day, hour, (minute // 5) * 5)
+```
 
-> Rationale: `price_to_beat` is fetched from Binance at the start of each 5-minute window and is constant throughout. A change in this value is an unambiguous market-window boundary.
+**Boundary rule:** when `window_key` changes between row N and row N+1, row N is the **last row of the current segment** and row N+1 is the **first row of the next segment**.
 
-**Consequence for `end_price`:** The closing row of a segment (the last row with the *old* `price_to_beat`) reflects the final observed price within that market period. This is the settlement-equivalent price used to determine the outcome.
+> Rationale: Polymarket's 5-minute windows are clock-aligned at :00, :05, :10, :15, :20, :25, :30, :35, :40, :45, :50, :55 past the hour. The window key derived from the row's UTC timestamp is an unambiguous boundary signal regardless of price. `price_to_beat` was considered as an alternative but is unreliable — if BTC opens two consecutive windows at the same price, `price_to_beat` would not change and two distinct episodes would be incorrectly merged.
+
+**Consequence for `end_price`:** The closing row of a segment is the last row whose timestamp falls within that window key. Its `current_price` is the final observed price and is used as `end_price`.
 
 ### 4. Filter (completeness)
 Discard any segment where no row has `time_to_close < 15000` (15 seconds remaining).
@@ -136,14 +140,15 @@ Using Python's built-in `unittest`. The script imports processing functions dire
 
 | Test | Description |
 |------|-------------|
-| `test_segment_boundary` | Two rows with different `price_to_beat` → second row starts a new segment, not appended to first |
-| `test_no_boundary_same_price` | Two rows with same `price_to_beat` → one segment |
-| `test_boundary_row_belongs_to_new_segment` | Boundary row (first row with new `price_to_beat`) is in the new segment; old segment's last row has the old `price_to_beat` |
+| `test_segment_boundary` | Two rows whose timestamps fall in different 5-minute windows → split into 2 segments |
+| `test_no_boundary_same_window` | Two rows whose timestamps fall in the same 5-minute window → one segment |
+| `test_boundary_row_belongs_to_new_segment` | First row after a clock boundary starts the new segment; last row before belongs to the old segment |
+| `test_same_price_to_beat_across_boundary` | Two consecutive windows with identical `price_to_beat` → still split correctly by timestamp |
 | `test_truncation_filter_drop` | Segment with no row having `time_to_close < 15000` → dropped |
 | `test_truncation_filter_keep` | Segment with one row having `time_to_close = 8000` → kept |
 | `test_outcome_up` | Last row `current_price > price_to_beat` → `"UP"` |
 | `test_outcome_down` | Last row `current_price < price_to_beat` → `"DOWN"` |
-| `test_end_price_is_last_old_regime_row` | `end_price` equals `current_price` of last row before `price_to_beat` changes |
+| `test_end_price_is_last_row_in_window` | `end_price` equals `current_price` of the last row whose timestamp falls within the window |
 | `test_hour_annotation` | Timestamp `2026-03-14T17:23:01Z` → `hour=17` |
 | `test_day_annotation` | Timestamp `2026-03-14T17:23:01Z` → `day=5` (Saturday) |
 | `test_no_files_error` | Empty `tsv/` directory → script exits with non-zero code and clear error message |
