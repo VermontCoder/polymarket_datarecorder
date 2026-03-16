@@ -40,3 +40,9 @@ def parse_row(line: str) -> dict:
         else:
             row[key] = float(raw)
     return row
+
+
+def get_window_key(timestamp: str) -> tuple:
+    """Return the 5-minute window key (y, m, d, h, floored_minute) for a UTC timestamp."""
+    dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return (dt.year, dt.month, dt.day, dt.hour, (dt.minute // 5) * 5)

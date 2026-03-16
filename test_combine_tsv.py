@@ -53,3 +53,31 @@ class TestParseRow(unittest.TestCase):
         result = combine_tsv.parse_row(row)
         self.assertIsInstance(result["time_to_close"], int)
         self.assertEqual(result["time_to_close"], 119733)
+
+
+class TestGetWindowKey(unittest.TestCase):
+
+    def test_window_key_rounds_minute_down(self):
+        # 17:23 → window starts at 17:20
+        key = combine_tsv.get_window_key("2026-03-14T17:23:01.761Z")
+        self.assertEqual(key, (2026, 3, 14, 17, 20))
+
+    def test_window_key_at_boundary(self):
+        # 17:25:00 → new window starting at 17:25
+        key = combine_tsv.get_window_key("2026-03-14T17:25:01.837Z")
+        self.assertEqual(key, (2026, 3, 14, 17, 25))
+
+    def test_window_key_hour_rollover(self):
+        # 18:00:xx → window starts at 18:00
+        key = combine_tsv.get_window_key("2026-03-14T18:00:05.000Z")
+        self.assertEqual(key, (2026, 3, 14, 18, 0))
+
+    def test_different_windows_give_different_keys(self):
+        key1 = combine_tsv.get_window_key("2026-03-14T17:24:59.792Z")
+        key2 = combine_tsv.get_window_key("2026-03-14T17:25:01.837Z")
+        self.assertNotEqual(key1, key2)
+
+    def test_same_window_gives_same_key(self):
+        key1 = combine_tsv.get_window_key("2026-03-14T17:23:01.761Z")
+        key2 = combine_tsv.get_window_key("2026-03-14T17:24:59.792Z")
+        self.assertEqual(key1, key2)
