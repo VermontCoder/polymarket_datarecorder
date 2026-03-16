@@ -128,3 +128,53 @@ def collect_files(tsv_dir: str = TSV_DIR) -> list[str]:
         print(f"Error: no files matching '{pattern}' found.", file=sys.stderr)
         sys.exit(1)
     return files
+
+
+def read_file_rows(filepath: str) -> tuple[list[dict], str, str]:
+    """
+    Parse all data rows from a TSV file.
+    Returns (rows, first_timestamp, last_timestamp).
+    Skips header lines (lines starting with 'Timestamp').
+    """
+    rows = []
+    with open(filepath, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("Timestamp"):
+                continue
+            rows.append(parse_row(line))
+    first_ts = rows[0]["timestamp"] if rows else ""
+    last_ts  = rows[-1]["timestamp"] if rows else ""
+    return rows, first_ts, last_ts
+
+
+def format_duration(first_ts: str, last_ts: str) -> str:
+    """Return elapsed time between two ISO 8601 UTC timestamps as 'Xh YYm'."""
+    dt1 = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+    dt2 = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+    total_minutes = int((dt2 - dt1).total_seconds() // 60)
+    return f"{total_minutes // 60}h {total_minutes % 60:02d}m"
+
+
+def print_stats(files: list[str], file_meta: list[dict],
+                episodes_written: int, dropped: int, elapsed: float) -> None:
+    """
+    Print processing summary to stdout.
+
+    file_meta is a list of dicts, one per file:
+        {"name": str, "first_ts": str, "last_ts": str, "episode_count": int}
+    """
+    bar = "─" * 65
+    print(bar)
+    print(f"Combined: {OUTPUT_FILE}")
+    print(bar)
+    print(f"Episodes written:  {episodes_written:>6}")
+    print(f"Dropped (no close):{dropped:>6}")
+    print(f"Processing time:   {elapsed:.1f}s")
+    print()
+    print("Date ranges by source file:")
+    for m in file_meta:
+        duration = format_duration(m["first_ts"], m["last_ts"])
+        name = os.path.basename(m["name"])
+        print(f"  {name:<42} {m['first_ts']} → {m['last_ts']}   {duration:>7}   {m['episode_count']:>3} episodes")
+    print(bar)

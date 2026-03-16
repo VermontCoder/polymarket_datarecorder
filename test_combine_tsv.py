@@ -329,3 +329,68 @@ class TestCollectFiles(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 combine_tsv.collect_files(d)
             self.assertNotEqual(ctx.exception.code, 0)
+
+
+class TestReadFileRows(unittest.TestCase):
+
+    def _write_tsv(self, path, lines):
+        header = "Timestamp\tUp Bid\tUp Ask\tDown Bid\tDown Ask\tPrice to Beat\tCurrent Price\tDifference %\tDifference $\tTime to Close (ms)\n"
+        with open(path, "w") as f:
+            f.write(header)
+            for line in lines:
+                f.write(line + "\n")
+
+    def test_skips_header_line(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False) as tmp:
+            path = tmp.name
+        try:
+            self._write_tsv(path, [
+                "2026-03-14T17:23:01Z\t55.00\t56.00\t44.00\t45.00\t70679.78\t70685.94\t0.008715\t6.16\t119733",
+                "2026-03-14T17:23:03Z\t55.00\t56.00\t44.00\t45.00\t70679.78\t70685.94\t0.008715\t6.16\t117661",
+            ])
+            rows, first_ts, last_ts = combine_tsv.read_file_rows(path)
+            self.assertEqual(len(rows), 2)           # header not included
+            self.assertEqual(first_ts, "2026-03-14T17:23:01Z")
+            self.assertEqual(last_ts, "2026-03-14T17:23:03Z")
+        finally:
+            os.unlink(path)
+
+    def test_returns_parsed_dicts(self):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tsv", delete=False) as tmp:
+            path = tmp.name
+        try:
+            self._write_tsv(path, [
+                "2026-03-14T17:23:01Z\t55.00\t56.00\t44.00\t45.00\t70679.78\t70685.94\t0.008715\t6.16\t119733",
+            ])
+            rows, _, _ = combine_tsv.read_file_rows(path)
+            self.assertAlmostEqual(rows[0]["up_bid"], 55.0)
+            self.assertEqual(rows[0]["time_to_close"], 119733)
+        finally:
+            os.unlink(path)
+
+
+class TestFormatDuration(unittest.TestCase):
+
+    def test_multi_hour_duration(self):
+        result = combine_tsv.format_duration(
+            "2026-03-14T17:00:00Z", "2026-03-14T23:36:00Z"
+        )
+        self.assertEqual(result, "6h 36m")
+
+    def test_sub_hour_duration(self):
+        result = combine_tsv.format_duration(
+            "2026-03-14T17:00:00Z", "2026-03-14T17:42:00Z"
+        )
+        self.assertEqual(result, "0h 42m")
+
+    def test_exactly_one_hour(self):
+        result = combine_tsv.format_duration(
+            "2026-03-14T17:00:00Z", "2026-03-14T18:00:00Z"
+        )
+        self.assertEqual(result, "1h 00m")
+
+    def test_midnight_crossing(self):
+        result = combine_tsv.format_duration(
+            "2026-03-14T23:00:00Z", "2026-03-15T01:30:00Z"
+        )
+        self.assertEqual(result, "2h 30m")
