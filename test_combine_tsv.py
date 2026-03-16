@@ -141,3 +141,41 @@ class TestSegmentRows(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(combine_tsv.segment_rows([]), [])
+
+
+class TestFilterSegments(unittest.TestCase):
+
+    def test_drops_segment_with_no_close_row(self):
+        segment = [
+            _make_parsed_row("2026-03-14T17:21:00Z", time_to_close=200000),
+            _make_parsed_row("2026-03-14T17:22:00Z", time_to_close=150000),
+        ]
+        kept, dropped = combine_tsv.filter_segments([segment])
+        self.assertEqual(len(kept), 0)
+        self.assertEqual(dropped, 1)
+
+    def test_keeps_segment_with_close_row(self):
+        segment = [
+            _make_parsed_row("2026-03-14T17:21:00Z", time_to_close=200000),
+            _make_parsed_row("2026-03-14T17:24:59Z", time_to_close=8000),
+        ]
+        kept, dropped = combine_tsv.filter_segments([segment])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(dropped, 0)
+
+    def test_keeps_segment_with_close_row_at_boundary(self):
+        # Exactly at threshold: 14999 is kept, 15000 is dropped
+        segment_kept = [_make_parsed_row("2026-03-14T17:24:59Z", time_to_close=14999)]
+        segment_drop = [_make_parsed_row("2026-03-14T17:24:59Z", time_to_close=15000)]
+        kept, dropped = combine_tsv.filter_segments([segment_kept, segment_drop])
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(dropped, 1)
+
+    def test_partial_start_segment_kept_if_close_confirmed(self):
+        # Segment starts mid-period (only a few rows) but reaches the close
+        segment = [
+            _make_parsed_row("2026-03-14T17:23:00Z", time_to_close=120000),
+            _make_parsed_row("2026-03-14T17:24:58Z", time_to_close=2000),
+        ]
+        kept, dropped = combine_tsv.filter_segments([segment])
+        self.assertEqual(len(kept), 1)

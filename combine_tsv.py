@@ -62,3 +62,19 @@ def segment_rows(rows: list[dict]) -> list[list[dict]]:
             current.append(row)
     segments.append(current)
     return segments
+
+
+def filter_segments(segments: list[list[dict]]) -> tuple[list[list[dict]], int]:
+    """
+    Discard segments with no near-close row.
+    Returns (kept_segments, dropped_count).
+    """
+    kept = []
+    dropped = 0
+    for seg in segments:
+        if any(r["time_to_close"] is not None and r["time_to_close"] < CLOSE_THRESHOLD_MS
+               for r in seg):
+            kept.append(seg)
+        else:
+            dropped += 1
+    return kept, dropped
