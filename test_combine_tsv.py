@@ -251,62 +251,118 @@ class TestAnnotateSegment(unittest.TestCase):
         self.assertEqual(episode["rows"][0]["timestamp"], "2026-03-14T17:23:01Z")
         self.assertEqual(episode["rows"][1]["timestamp"], "2026-03-14T17:23:03Z")
 
+    def test_session_id_is_window_start(self):
+        # 17:23 UTC → window starts at 17:20 → session_id = "2026-03-14T17:20:00Z"
+        rows = [_make_parsed_row("2026-03-14T17:23:01Z")]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertEqual(episode["session_id"], "2026-03-14T17:20:00Z")
+
+
+class TestAnnotateCrossEpisode(unittest.TestCase):
+
+    def _make_episode(self, session_id, start_price=80000.0, diff_pct_last_row=0.01):
+        return {
+            "session_id":  session_id,
+            "outcome":     "UP",
+            "hour":        17,
+            "day":         0,
+            "start_price": start_price,
+            "end_price":   start_price + 10,
+            "rows": [
+                _make_parsed_row("2026-03-14T17:23:01Z"),
+                {**_make_parsed_row("2026-03-14T17:24:59Z", time_to_close=1592),
+                 "diff_pct": diff_pct_last_row},
+            ],
+        }
+
+    def test_first_episode_prev_session_is_none(self):
+        episodes = [self._make_episode("2026-03-14T17:20:00Z")]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertIsNone(result[0]["diff_pct_prev_session"])
+
+    def test_prev_session_diff_pct_from_last_row(self):
+        episodes = [
+            self._make_episode("2026-03-14T17:20:00Z", diff_pct_last_row=0.0123),
+            self._make_episode("2026-03-14T17:25:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertAlmostEqual(result[1]["diff_pct_prev_session"], 0.0123)
+
+    def test_diff_pct_hour_none_when_no_prior_session(self):
+        episodes = [self._make_episode("2026-03-14T17:20:00Z", start_price=80000.0)]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertIsNone(result[0]["diff_pct_hour"])
+
+    def test_diff_pct_hour_computed_when_prior_session_exists(self):
+        episodes = [
+            self._make_episode("2026-03-14T16:20:00Z", start_price=80000.0),
+            self._make_episode("2026-03-14T17:20:00Z", start_price=80800.0),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertAlmostEqual(result[1]["diff_pct_hour"], 1.0)  # (80800-80000)/80000 * 100
+
+    def test_diff_pct_hour_none_when_gap_is_not_exactly_one_hour(self):
+        # 17:25 is 1h05m after 16:20 — not exactly 1 hour
+        episodes = [
+            self._make_episode("2026-03-14T16:20:00Z", start_price=80000.0),
+            self._make_episode("2026-03-14T17:25:00Z", start_price=80800.0),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertIsNone(result[1]["diff_pct_hour"])
+
 
 class TestWriteOutput(unittest.TestCase):
 
-    def _make_episode(self, outcome="UP", hour=17, day=5):
+    def _make_episode(self, outcome="UP", hour=17, day=5,
+                      session_id="2026-03-14T17:20:00Z"):
         return {
-            "outcome": outcome,
-            "hour": hour,
-            "day": day,
-            "start_price": 70679.78,
-            "end_price": 70694.50,
+            "session_id":            session_id,
+            "outcome":               outcome,
+            "hour":                  hour,
+            "day":                   day,
+            "start_price":           70679.78,
+            "end_price":             70694.50,
+            "diff_pct_prev_session": None,
+            "diff_pct_hour":         None,
             "rows": [
                 _make_parsed_row("2026-03-14T17:23:01Z"),
                 _make_parsed_row("2026-03-14T17:24:59Z", time_to_close=1592),
             ],
         }
 
-    def test_output_is_parseable_json_per_block(self):
-        episodes = [self._make_episode("UP"), self._make_episode("DOWN")]
-        text = combine_tsv.format_output(episodes)
-        blocks = text.strip().split("\n\n")
-        self.assertEqual(len(blocks), 2)
-        parsed = json.loads(blocks[0])
-        self.assertEqual(parsed["outcome"], "UP")
+    def test_output_is_valid_json_array(self):
+        episodes = [self._make_episode("UP",  session_id="2026-03-14T17:20:00Z"),
+                    self._make_episode("DOWN", session_id="2026-03-14T17:25:00Z")]
+        arr = json.loads(combine_tsv.format_output(episodes))
+        self.assertIsInstance(arr, list)
+        self.assertEqual(len(arr), 2)
 
-    def test_each_row_on_its_own_line(self):
-        episodes = [self._make_episode()]
-        text = combine_tsv.format_output(episodes)
-        block = text.strip().split("\n\n")[0]
-        lines = block.split("\n")
-        # First line: opening brace with metadata and rows:[
-        # Middle lines: one row dict each
-        # Last line: closing ]}
-        self.assertIn('"outcome"', lines[0])
-        self.assertIn('"timestamp"', lines[1])  # first row
-        self.assertIn('"timestamp"', lines[2])  # second row
-
-    def test_no_blank_lines_within_episode(self):
-        episodes = [self._make_episode()]
-        text = combine_tsv.format_output(episodes)
-        block = text.strip().split("\n\n")[0]
-        self.assertNotIn("\n\n", block)
-
-    def test_episodes_separated_by_exactly_one_blank_line(self):
-        episodes = [self._make_episode(), self._make_episode(), self._make_episode()]
-        text = combine_tsv.format_output(episodes)
-        # Should be exactly 2 blank-line separators for 3 episodes
-        self.assertEqual(text.count("\n\n"), 2)
+    def test_session_id_present_in_episode(self):
+        episodes = [self._make_episode(session_id="2026-03-14T17:20:00Z")]
+        arr = json.loads(combine_tsv.format_output(episodes))
+        self.assertEqual(arr[0]["session_id"], "2026-03-14T17:20:00Z")
 
     def test_outcome_and_metadata_in_output(self):
-        episodes = [self._make_episode("DOWN", hour=9, day=0)]
-        text = combine_tsv.format_output(episodes)
-        parsed = json.loads(text.strip().split("\n\n")[0])
-        self.assertEqual(parsed["outcome"], "DOWN")
-        self.assertEqual(parsed["hour"], 9)
-        self.assertEqual(parsed["day"], 0)
-        self.assertAlmostEqual(parsed["start_price"], 70679.78)
+        episodes = [self._make_episode("DOWN", hour=9, day=0,
+                                       session_id="2026-03-14T17:20:00Z")]
+        arr = json.loads(combine_tsv.format_output(episodes))
+        ep = arr[0]
+        self.assertEqual(ep["outcome"], "DOWN")
+        self.assertEqual(ep["hour"], 9)
+        self.assertEqual(ep["day"], 0)
+        self.assertAlmostEqual(ep["start_price"], 70679.78)
+
+    def test_rows_present_in_output(self):
+        episodes = [self._make_episode()]
+        arr = json.loads(combine_tsv.format_output(episodes))
+        self.assertEqual(len(arr[0]["rows"]), 2)
+        self.assertEqual(arr[0]["rows"][0]["timestamp"], "2026-03-14T17:23:01Z")
+
+    def test_price_to_beat_excluded_from_rows(self):
+        episodes = [self._make_episode()]
+        arr = json.loads(combine_tsv.format_output(episodes))
+        for row in arr[0]["rows"]:
+            self.assertNotIn("price_to_beat", row)
 
 
 import tempfile
@@ -396,18 +452,24 @@ class TestFormatDuration(unittest.TestCase):
         self.assertEqual(result, "2h 30m")
 
 
-COMBINED_FILE = "btc_polymarket_combined.json"
+import glob as _glob
+
+def _find_latest_combined():
+    files = sorted(_glob.glob("data/btc_polymarket_combined_*.json"))
+    return files[-1] if files else None
+
+COMBINED_FILE = _find_latest_combined()
 TSV_DIR = "tsv"
 
 
-@unittest.skipUnless(os.path.exists(COMBINED_FILE),
+@unittest.skipUnless(COMBINED_FILE is not None,
                      "combined file not present — run combine_tsv.py first")
 class TestSpotChecks(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
         with open(COMBINED_FILE) as f:
-            cls.episodes = [json.loads(b) for b in f.read().strip().split("\n\n")]
+            cls.episodes = json.load(f)
 
     def test_spot_episode_1_first_window(self):
         """

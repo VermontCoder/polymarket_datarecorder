@@ -67,8 +67,9 @@ Discard any segment where no row has `time_to_close < 15000` (15 seconds remaini
 
 Partial-start segments (recording began mid-period) are **kept** as long as they satisfy the close condition. No minimum row count is required — the agent simply starts making decisions from wherever the data begins. This is intentional: partial-start segments are valid training episodes.
 
-### 5. Annotate
+### 5. Annotate (per-segment)
 For each valid segment:
+- `session_id`: ISO 8601 UTC timestamp of the window start (e.g. `"2026-03-14T17:20:00Z"`), derived from the window key of the first row
 - `outcome`: `"UP"` if last row's `current_price >= price_to_beat`, else `"DOWN"`. An exact tie resolves as `"UP"` — consistent with how Polymarket resolves the market.
 - `start_price`: the segment's `price_to_beat` value
 - `end_price`: `current_price` from the last row in the segment (i.e., the last row with the old `price_to_beat`, per the boundary rule above)
@@ -77,35 +78,61 @@ For each valid segment:
 
 > Note: for partial-start segments, `hour` and `day` are derived from the first *captured* row, not the true market window open. The hour and day are the same as the true window open since the window is only 5 minutes, so this is correct.
 
-### 6. Write
-Emit episodes to `btc_polymarket_combined.json` in the project root.
+### 6. Annotate (cross-episode)
+After all episodes are assembled, two cross-episode fields are computed:
+- `diff_pct_prev_session`: the `diff_pct` value from the last row of the immediately preceding episode (`null` for the first episode)
+- `diff_pct_hour`: `(start_price - hour_ago_start_price) / hour_ago_start_price * 100`, where `hour_ago` is the episode whose `session_id` is exactly 1 hour before the current one (`null` if that episode does not exist in the data)
+
+### 7. Write
+Emit all episodes as a JSON array to a timestamped file in the `data/` directory:
+```
+data/btc_polymarket_combined_YYYYMMDD_HHMMSS.json
+```
+The timestamp in the filename is the UTC wall-clock time at the moment the script runs. The `data/` directory is gitignored.
 
 ---
 
 ## Output Format
 
-One JSON object per episode. Episodes separated by **exactly one blank line** (`\n\n` between episodes). Each row in the `rows` array appears on its own line. **No blank lines appear within a single episode block.**
+A single JSON array of episode objects, serialized with `json.dumps(indent=2)`. Parsed with `json.load()`.
+
+Field order within each episode object:
 
 ```json
-{"outcome":"UP","hour":17,"day":4,"start_price":70679.78,"end_price":70720.10,"rows":[
-{"timestamp":"2026-03-14T17:23:01Z","up_bid":55.0,"up_ask":56.0,"down_bid":44.0,"down_ask":45.0,"price_to_beat":70679.78,"current_price":70685.94,"diff_pct":0.008715,"diff_usd":6.16,"time_to_close":119733},
-{"timestamp":"2026-03-14T17:23:03Z","up_bid":45.0,"up_ask":51.0,"down_bid":49.0,"down_ask":55.0,"price_to_beat":70679.78,"current_price":70685.94,"diff_pct":0.008715,"diff_usd":6.16,"time_to_close":117661}
-]}
-
-{"outcome":"DOWN","hour":17,"day":4,"start_price":70694.51,"end_price":70650.22,"rows":[
-...
-]}
+[
+  {
+    "session_id": "2026-03-14T17:20:00Z",
+    "outcome": "UP",
+    "hour": 17,
+    "day": 5,
+    "start_price": 70679.78,
+    "end_price": 70694.50,
+    "diff_pct_prev_session": null,
+    "diff_pct_hour": null,
+    "rows": [
+      {"timestamp":"2026-03-14T17:23:01Z","up_bid":55.0,"up_ask":56.0,"down_bid":44.0,"down_ask":45.0,"current_price":70685.94,"diff_pct":0.008715,"diff_usd":6.16,"time_to_close":119733},
+      {"timestamp":"2026-03-14T17:24:59Z","up_bid":55.0,"up_ask":56.0,"down_bid":44.0,"down_ask":45.0,"current_price":70694.50,"diff_pct":0.020826,"diff_usd":14.72,"time_to_close":1592}
+    ]
+  },
+  {
+    "session_id": "2026-03-14T17:25:00Z",
+    "outcome": "DOWN",
+    ...
+  }
+]
 ```
+
+Notes:
+- `price_to_beat` is **omitted from each row** — it is redundant with the episode-level `start_price`
+- `diff_pct_prev_session` and `diff_pct_hour` use the same scale as the row-level `diff_pct` field (i.e. `* 100`, not a raw ratio)
 
 ### Parsing convention for training code
 ```python
-with open("btc_polymarket_combined.json") as f:
-    content = f.read()
+import json
 
-episodes = [json.loads(block) for block in content.strip().split("\n\n")]
+with open("data/btc_polymarket_combined_YYYYMMDD_HHMMSS.json") as f:
+    episodes = json.load(f)
 ```
-
-This works because no blank lines appear within any episode block — the only `\n\n` sequences in the file are the episode separators.
 
 ---
 
@@ -114,19 +141,19 @@ This works because no blank lines appear within any episode block — the only `
 Printed to stdout on completion:
 
 ```
-─────────────────────────────────────────────────────────────────
-Combined: btc_polymarket_combined.json
-─────────────────────────────────────────────────────────────────
-Episodes written:     142
-Dropped (no close):    12
-Processing time:      1.3s
+-----------------------------------------------------------------
+Combined: data\btc_polymarket_combined_20260316_230233.json
+-----------------------------------------------------------------
+Episodes written:     620
+Dropped (no close):     3
+Processing time:      0.6s
 
 Date ranges by source file:
-  btc_polymarket_20260314_132259.tsv   2026-03-14T17:22:59Z → 2026-03-14T23:59:51Z   6h 36m    78 episodes
-  btc_polymarket_20260314_210528.tsv   2026-03-14T21:05:28Z → 2026-03-15T03:12:44Z   6h 07m    21 episodes
-  btc_polymarket_20260315_210627.tsv   2026-03-15T21:06:27Z → 2026-03-16T04:00:03Z   6h 53m    30 episodes
-  btc_polymarket_20260316_093828.tsv   2026-03-16T09:38:29Z → 2026-03-16T13:40:01Z   4h 01m    13 episodes
-─────────────────────────────────────────────────────────────────
+  btc_polymarket_20260314_132259.tsv   2026-03-14T17:22:59Z -> 2026-03-15T01:00:17Z   7h 37m    92 episodes
+  btc_polymarket_20260314_210528.tsv   2026-03-15T01:05:29Z -> 2026-03-15T23:52:37Z  22h 47m   273 episodes
+  btc_polymarket_20260315_210627.tsv   2026-03-16T01:06:27Z -> 2026-03-16T12:50:13Z  11h 43m   141 episodes
+  btc_polymarket_20260316_093828.tsv   2026-03-16T13:38:29Z -> 2026-03-16T23:02:31Z   9h 24m   114 episodes
+-----------------------------------------------------------------
 ```
 
 Fields:
@@ -146,34 +173,30 @@ Using Python's built-in `unittest`. The script imports processing functions dire
 
 ### Unit tests
 
-| Test | Description |
-|------|-------------|
-| `test_segment_boundary` | Two rows whose timestamps fall in different 5-minute windows → split into 2 segments |
-| `test_no_boundary_same_window` | Two rows whose timestamps fall in the same 5-minute window → one segment |
-| `test_boundary_row_belongs_to_new_segment` | First row after a clock boundary starts the new segment; last row before belongs to the old segment |
-| `test_same_price_to_beat_across_boundary` | Two consecutive windows with identical `price_to_beat` → still split correctly by timestamp |
-| `test_truncation_filter_drop` | Segment with no row having `time_to_close < 15000` → dropped |
-| `test_truncation_filter_keep` | Segment with one row having `time_to_close = 8000` → kept |
-| `test_outcome_up` | Last row `current_price > price_to_beat` → `"UP"` |
-| `test_outcome_up_tie` | Last row `current_price == price_to_beat` → `"UP"` |
-| `test_outcome_down` | Last row `current_price < price_to_beat` → `"DOWN"` |
-| `test_end_price_is_last_row_in_window` | `end_price` equals `current_price` of the last row whose timestamp falls within the window |
-| `test_hour_annotation` | Timestamp `2026-03-14T17:23:01Z` → `hour=17` |
-| `test_day_annotation` | Timestamp `2026-03-14T17:23:01Z` → `day=5` (Saturday) |
-| `test_no_files_error` | Empty `tsv/` directory → script exits with non-zero code and clear error message |
-| `test_output_no_blank_lines_within_episode` | No `\n\n` appears within any single episode block in the output |
+| Test class | Description |
+|------------|-------------|
+| `TestParseRow` | TSV line parsing, empty fields → `None`, `time_to_close` truncated to int |
+| `TestGetWindowKey` | 5-minute window key derivation, boundary and rollover cases |
+| `TestSegmentRows` | Clock-boundary segmentation, boundary row ownership, empty input |
+| `TestFilterSegments` | Completeness filter at threshold (14999 kept, 15000 dropped) |
+| `TestAnnotateSegment` | `outcome`, `start_price`, `end_price`, `hour`, `day`, `session_id`, row preservation |
+| `TestAnnotateCrossEpisode` | `diff_pct_prev_session` (None for first episode, value from last row of prior), `diff_pct_hour` (None when no exact hour-prior session, computed value when present) |
+| `TestWriteOutput` | Valid JSON array, session_id as attribute, `price_to_beat` excluded from rows, metadata and rows present |
+| `TestCollectFiles` | Sorted file list, non-zero exit on empty directory |
+| `TestReadFileRows` | Header skipping, parsed dicts returned |
+| `TestFormatDuration` | Duration formatting across hours and midnight |
 
 ### Integration / spot-check tests
 
-Load the actual combined output file and verify known episodes from the source TSV files:
+Load the most recent combined file from `data/` and verify known episodes against the source TSVs:
 
 | Test | Source file | Known boundary | Expected fields |
 |------|-------------|----------------|-----------------|
-| `test_spot_episode_1` | `btc_polymarket_20260314_132259.tsv` | First complete segment starting ~17:25 UTC | `outcome`, `start_price`, `end_price`, `hour=17`, `day=5` |
-| `test_spot_episode_2` | `btc_polymarket_20260315_210627.tsv` | First complete segment in that file | `outcome`, `hour`, `day=6` (Sunday) |
-| `test_spot_episode_3` | `btc_polymarket_20260316_093828.tsv` | Last complete segment | `outcome`, correct `end_price` matches last TSV row's `current_price` |
+| `test_spot_episode_1` | `btc_polymarket_20260314_132259.tsv` | First window (~17:20 UTC) | `outcome`, `start_price`, `end_price`, `hour=17`, `day=5` |
+| `test_spot_episode_2` | `btc_polymarket_20260315_210627.tsv` | First complete segment in that file | `outcome`, `hour=1`, `day=0` (Monday) |
+| `test_spot_episode_3` | `btc_polymarket_20260316_093828.tsv` | Last complete segment | `end_price` consistent within episode and with source TSV |
 
-Spot-check tests are skipped automatically if `btc_polymarket_combined.json` does not exist (they require the combiner to have been run first).
+Spot-check tests are skipped automatically if no combined file exists in `data/` (they require `python combine_tsv.py` to have been run first).
 
 ---
 
@@ -183,7 +206,7 @@ Spot-check tests are skipped automatically if `btc_polymarket_combined.json` doe
 |------|--------|
 | `combine_tsv.py` | New — main script |
 | `test_combine_tsv.py` | New — unit + integration tests |
-| `btc_polymarket_combined.json` | Generated — not committed to git |
+| `data/btc_polymarket_combined_*.json` | Generated — gitignored via `data/` |
 
 ---
 

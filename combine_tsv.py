@@ -13,11 +13,11 @@ import json
 import os
 import time
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 TSV_DIR     = "tsv"
 TSV_PATTERN = "btc_polymarket_*.tsv"
-OUTPUT_FILE = "btc_polymarket_combined.json"
+OUTPUT_DIR  = "data"
 CLOSE_THRESHOLD_MS = 15_000  # segment must have a row within 15s of close
 
 _COLUMNS = [
@@ -84,8 +84,11 @@ def annotate_segment(rows: list[dict]) -> dict:
     """Compute episode metadata for a validated segment."""
     first, last = rows[0], rows[-1]
     dt = datetime.fromisoformat(first["timestamp"].replace("Z", "+00:00"))
+    key = get_window_key(first["timestamp"])
+    session_id = f"{key[0]:04d}-{key[1]:02d}-{key[2]:02d}T{key[3]:02d}:{key[4]:02d}:00Z"
     outcome = "UP" if last["current_price"] >= last["price_to_beat"] else "DOWN"
     return {
+        "session_id":  session_id,
         "outcome":     outcome,
         "hour":        dt.hour,
         "day":         dt.weekday(),   # 0=Monday, 6=Sunday
@@ -95,29 +98,52 @@ def annotate_segment(rows: list[dict]) -> dict:
     }
 
 
-def format_episode(episode: dict) -> str:
+def annotate_cross_episode(episodes: list[dict]) -> list[dict]:
     """
-    Serialize one episode to a string.
-    Opening line: JSON object with metadata and 'rows':[
-    Middle lines: one row JSON object per line (comma-separated)
-    Closing line: ]}
-    No blank lines within the block.
+    Add two cross-episode fields to each episode (mutates in place):
+      diff_pct_prev_session : diff_pct from the last row of the previous episode
+                              (None for the first episode)
+      diff_pct_hour         : (start_price - hour_ago_start_price) / hour_ago_start_price
+                              where hour_ago is the session whose session_id is exactly
+                              1 hour before this one (None if that session doesn't exist)
     """
-    rows = episode["rows"]
-    meta = {k: v for k, v in episode.items() if k != "rows"}
-    # Build opening line: {"outcome":"UP","hour":17,...,"rows":[
-    opening = json.dumps(meta, separators=(",", ":"))[:-1] + ',"rows":['
-    row_lines = []
-    for i, row in enumerate(rows):
-        suffix = "," if i < len(rows) - 1 else ""
-        row_lines.append(json.dumps(row, separators=(",", ":")) + suffix)
-    closing = "]}"
-    return "\n".join([opening] + row_lines + [closing])
+    by_session = {ep["session_id"]: ep for ep in episodes}
+
+    for i, ep in enumerate(episodes):
+        ep["diff_pct_prev_session"] = (
+            None if i == 0 else episodes[i - 1]["rows"][-1]["diff_pct"]
+        )
+        dt = datetime.fromisoformat(ep["session_id"].replace("Z", "+00:00"))
+        prev_hour_id = (dt - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:00Z")
+        prev_hour_ep = by_session.get(prev_hour_id)
+        ep["diff_pct_hour"] = (
+            (ep["start_price"] - prev_hour_ep["start_price"]) / prev_hour_ep["start_price"] * 100
+            if prev_hour_ep else None
+        )
+
+    return episodes
 
 
 def format_output(episodes: list[dict]) -> str:
-    """Serialize all episodes separated by a single blank line."""
-    return "\n\n".join(format_episode(ep) for ep in episodes)
+    """Serialize all episodes as a JSON array."""
+    out = []
+    for ep in episodes:
+        ep_out = {
+            "session_id":            ep["session_id"],
+            "outcome":               ep["outcome"],
+            "hour":                  ep["hour"],
+            "day":                   ep["day"],
+            "start_price":           ep["start_price"],
+            "end_price":             ep["end_price"],
+            "diff_pct_prev_session": ep["diff_pct_prev_session"],
+            "diff_pct_hour":         ep["diff_pct_hour"],
+            "rows": [
+                {k: v for k, v in row.items() if k != "price_to_beat"}
+                for row in ep["rows"]
+            ],
+        }
+        out.append(ep_out)
+    return json.dumps(out, indent=2)
 
 
 def collect_files(tsv_dir: str = TSV_DIR) -> list[str]:
@@ -157,7 +183,8 @@ def format_duration(first_ts: str, last_ts: str) -> str:
 
 
 def print_stats(files: list[str], file_meta: list[dict],
-                episodes_written: int, dropped: int, elapsed: float) -> None:
+                episodes_written: int, dropped: int, elapsed: float,
+                output_file: str = "") -> None:
     """
     Print processing summary to stdout.
 
@@ -166,7 +193,7 @@ def print_stats(files: list[str], file_meta: list[dict],
     """
     bar = "-" * 65
     print(bar)
-    print(f"Combined: {OUTPUT_FILE}")
+    print(f"Combined: {output_file}")
     print(bar)
     print(f"Episodes written:  {episodes_written:>6}")
     print(f"Dropped (no close):{dropped:>6}")
@@ -199,7 +226,7 @@ def main():
 
     segments = segment_rows(all_rows)
     kept, dropped = filter_segments(segments)
-    episodes = [annotate_segment(seg) for seg in kept]
+    episodes = annotate_cross_episode([annotate_segment(seg) for seg in kept])
 
     # Credit each episode to the source file whose timestamp range contains
     # the episode's first row. Files are non-overlapping and sorted, so at
@@ -211,12 +238,16 @@ def main():
                 meta["episode_count"] += 1
                 break
 
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    output_file = os.path.join(OUTPUT_DIR, f"btc_polymarket_combined_{ts}.json")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     output_text = format_output(episodes)
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    with open(output_file, "w", encoding="utf-8") as f:
         f.write(output_text)
 
     elapsed = time.perf_counter() - t0
-    print_stats(files, file_meta, len(episodes), dropped, elapsed)
+    print_stats(files, file_meta, len(episodes), dropped, elapsed, output_file)
 
 
 if __name__ == "__main__":
