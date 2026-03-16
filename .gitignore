@@ -2,3 +2,4 @@
 *.tsv
 __pycache__/
 *.pyc
+btc_polymarket_combined.json
