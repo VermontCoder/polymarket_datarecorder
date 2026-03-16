@@ -69,7 +69,7 @@ Partial-start segments (recording began mid-period) are **kept** as long as they
 
 ### 5. Annotate
 For each valid segment:
-- `outcome`: `"UP"` if last row's `current_price > price_to_beat`, else `"DOWN"`. An exact tie (`current_price == price_to_beat`) is treated as `"DOWN"` — this is intentional and consistent with how Polymarket resolves the market.
+- `outcome`: `"UP"` if last row's `current_price >= price_to_beat`, else `"DOWN"`. An exact tie resolves as `"UP"` — consistent with how Polymarket resolves the market.
 - `start_price`: the segment's `price_to_beat` value
 - `end_price`: `current_price` from the last row in the segment (i.e., the last row with the old `price_to_beat`, per the boundary rule above)
 - `hour`: integer 0–23, from `datetime.fromisoformat(timestamp).hour` (UTC)
@@ -147,6 +147,7 @@ Using Python's built-in `unittest`. The script imports processing functions dire
 | `test_truncation_filter_drop` | Segment with no row having `time_to_close < 15000` → dropped |
 | `test_truncation_filter_keep` | Segment with one row having `time_to_close = 8000` → kept |
 | `test_outcome_up` | Last row `current_price > price_to_beat` → `"UP"` |
+| `test_outcome_up_tie` | Last row `current_price == price_to_beat` → `"UP"` |
 | `test_outcome_down` | Last row `current_price < price_to_beat` → `"DOWN"` |
 | `test_end_price_is_last_row_in_window` | `end_price` equals `current_price` of the last row whose timestamp falls within the window |
 | `test_hour_annotation` | Timestamp `2026-03-14T17:23:01Z` → `hour=17` |
