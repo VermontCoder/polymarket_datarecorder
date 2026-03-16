@@ -164,7 +164,7 @@ def print_stats(files: list[str], file_meta: list[dict],
     file_meta is a list of dicts, one per file:
         {"name": str, "first_ts": str, "last_ts": str, "episode_count": int}
     """
-    bar = "─" * 65
+    bar = "-" * 65
     print(bar)
     print(f"Combined: {OUTPUT_FILE}")
     print(bar)
@@ -176,5 +176,48 @@ def print_stats(files: list[str], file_meta: list[dict],
     for m in file_meta:
         duration = format_duration(m["first_ts"], m["last_ts"])
         name = os.path.basename(m["name"])
-        print(f"  {name:<42} {m['first_ts']} → {m['last_ts']}   {duration:>7}   {m['episode_count']:>3} episodes")
+        print(f"  {name:<42} {m['first_ts']} -> {m['last_ts']}   {duration:>7}   {m['episode_count']:>3} episodes")
     print(bar)
+
+
+def main():
+    t0 = time.perf_counter()
+    files = collect_files()
+
+    all_rows: list[dict] = []
+    file_meta: list[dict] = []
+
+    for filepath in files:
+        rows, first_ts, last_ts = read_file_rows(filepath)
+        file_meta.append({
+            "name": filepath,
+            "first_ts": first_ts,
+            "last_ts": last_ts,
+            "episode_count": 0,
+        })
+        all_rows.extend(rows)
+
+    segments = segment_rows(all_rows)
+    kept, dropped = filter_segments(segments)
+    episodes = [annotate_segment(seg) for seg in kept]
+
+    # Credit each episode to the source file whose timestamp range contains
+    # the episode's first row. Files are non-overlapping and sorted, so at
+    # most one file will match.
+    for ep in episodes:
+        ep_ts = ep["rows"][0]["timestamp"]
+        for meta in file_meta:
+            if meta["first_ts"] <= ep_ts <= meta["last_ts"]:
+                meta["episode_count"] += 1
+                break
+
+    output_text = format_output(episodes)
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(output_text)
+
+    elapsed = time.perf_counter() - t0
+    print_stats(files, file_meta, len(episodes), dropped, elapsed)
+
+
+if __name__ == "__main__":
+    main()
