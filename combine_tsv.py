@@ -78,3 +78,18 @@ def filter_segments(segments: list[list[dict]]) -> tuple[list[list[dict]], int]:
         else:
             dropped += 1
     return kept, dropped
+
+
+def annotate_segment(rows: list[dict]) -> dict:
+    """Compute episode metadata for a validated segment."""
+    first, last = rows[0], rows[-1]
+    dt = datetime.fromisoformat(first["timestamp"].replace("Z", "+00:00"))
+    outcome = "UP" if last["current_price"] >= last["price_to_beat"] else "DOWN"
+    return {
+        "outcome":     outcome,
+        "hour":        dt.hour,
+        "day":         dt.weekday(),   # 0=Monday, 6=Sunday
+        "start_price": last["price_to_beat"],
+        "end_price":   last["current_price"],
+        "rows":        rows,
+    }

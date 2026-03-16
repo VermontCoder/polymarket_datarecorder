@@ -179,3 +179,74 @@ class TestFilterSegments(unittest.TestCase):
         ]
         kept, dropped = combine_tsv.filter_segments([segment])
         self.assertEqual(len(kept), 1)
+
+
+class TestAnnotateSegment(unittest.TestCase):
+
+    def test_outcome_up_when_current_greater(self):
+        rows = [_make_parsed_row("2026-03-14T17:24:59Z",
+                                  price_to_beat=70000.0, current_price=70010.0,
+                                  time_to_close=500)]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertEqual(episode["outcome"], "UP")
+
+    def test_outcome_up_on_exact_tie(self):
+        rows = [_make_parsed_row("2026-03-14T17:24:59Z",
+                                  price_to_beat=70000.0, current_price=70000.0,
+                                  time_to_close=500)]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertEqual(episode["outcome"], "UP")
+
+    def test_outcome_down_when_current_less(self):
+        rows = [_make_parsed_row("2026-03-14T17:24:59Z",
+                                  price_to_beat=70000.0, current_price=69990.0,
+                                  time_to_close=500)]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertEqual(episode["outcome"], "DOWN")
+
+    def test_start_price_is_price_to_beat(self):
+        rows = [_make_parsed_row("2026-03-14T17:24:59Z", price_to_beat=70679.78)]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertAlmostEqual(episode["start_price"], 70679.78)
+
+    def test_end_price_is_current_price_of_last_row(self):
+        # Two rows with DIFFERENT current_price — ensures end_price is from last, not first
+        rows = [
+            _make_parsed_row("2026-03-14T17:23:00Z", current_price=70685.94),
+            _make_parsed_row("2026-03-14T17:24:59Z", current_price=70694.50),
+        ]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertAlmostEqual(episode["end_price"], 70694.50)   # last row, not 70685.94
+
+    def test_hour_annotation(self):
+        rows = [_make_parsed_row("2026-03-14T17:23:01Z")]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertEqual(episode["hour"], 17)
+
+    def test_day_annotation_saturday(self):
+        # 2026-03-14 is a Saturday → weekday() == 5
+        rows = [_make_parsed_row("2026-03-14T17:23:01Z")]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertEqual(episode["day"], 5)
+
+    def test_hour_and_day_from_first_row_not_last(self):
+        # Segment spanning midnight: first row at 23:59 (hour=23, day=5 Saturday),
+        # last row at 00:00 next day (would be hour=0, day=6 Sunday).
+        # hour and day must come from the FIRST row.
+        rows = [
+            _make_parsed_row("2026-03-14T23:59:01Z"),   # Saturday 23:59
+            _make_parsed_row("2026-03-14T23:59:57Z"),   # still Saturday (same window)
+        ]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertEqual(episode["hour"], 23)
+        self.assertEqual(episode["day"], 5)   # Saturday, not Sunday
+
+    def test_rows_are_preserved_in_order(self):
+        rows = [
+            _make_parsed_row("2026-03-14T17:23:01Z"),
+            _make_parsed_row("2026-03-14T17:23:03Z"),
+        ]
+        episode = combine_tsv.annotate_segment(rows)
+        self.assertEqual(len(episode["rows"]), 2)
+        self.assertEqual(episode["rows"][0]["timestamp"], "2026-03-14T17:23:01Z")
+        self.assertEqual(episode["rows"][1]["timestamp"], "2026-03-14T17:23:03Z")
