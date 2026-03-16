@@ -19,3 +19,24 @@ TSV_DIR     = "tsv"
 TSV_PATTERN = "btc_polymarket_*.tsv"
 OUTPUT_FILE = "btc_polymarket_combined.json"
 CLOSE_THRESHOLD_MS = 15_000  # segment must have a row within 15s of close
+
+_COLUMNS = [
+    "timestamp", "up_bid", "up_ask", "down_bid", "down_ask",
+    "price_to_beat", "current_price", "diff_pct", "diff_usd", "time_to_close",
+]
+
+
+def parse_row(line: str) -> dict:
+    """Parse a single TSV data line into a dict. Empty fields become None."""
+    parts = line.rstrip("\n").split("\t")
+    row = {}
+    for key, raw in zip(_COLUMNS, parts):
+        if raw == "":
+            row[key] = None
+        elif key == "timestamp":
+            row[key] = raw
+        elif key == "time_to_close":
+            row[key] = int(float(raw))
+        else:
+            row[key] = float(raw)
+    return row
