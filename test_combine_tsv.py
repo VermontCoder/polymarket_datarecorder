@@ -307,3 +307,25 @@ class TestWriteOutput(unittest.TestCase):
         self.assertEqual(parsed["hour"], 9)
         self.assertEqual(parsed["day"], 0)
         self.assertAlmostEqual(parsed["start_price"], 70679.78)
+
+
+import tempfile
+
+
+class TestCollectFiles(unittest.TestCase):
+
+    def test_returns_sorted_list(self):
+        with tempfile.TemporaryDirectory() as d:
+            # Create two fake TSV files
+            for name in ["btc_polymarket_20260315_120000.tsv",
+                         "btc_polymarket_20260314_090000.tsv"]:
+                open(os.path.join(d, name), "w").close()
+            result = combine_tsv.collect_files(d)
+        basenames = [os.path.basename(f) for f in result]
+        self.assertEqual(basenames, sorted(basenames))
+
+    def test_raises_on_no_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit) as ctx:
+                combine_tsv.collect_files(d)
+            self.assertNotEqual(ctx.exception.code, 0)

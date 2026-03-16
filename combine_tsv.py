@@ -118,3 +118,13 @@ def format_episode(episode: dict) -> str:
 def format_output(episodes: list[dict]) -> str:
     """Serialize all episodes separated by a single blank line."""
     return "\n\n".join(format_episode(ep) for ep in episodes)
+
+
+def collect_files(tsv_dir: str = TSV_DIR) -> list[str]:
+    """Return sorted list of TSV file paths. Exits with error if none found."""
+    pattern = f"{tsv_dir}/{TSV_PATTERN}"
+    files = sorted(glob.glob(pattern))
+    if not files:
+        print(f"Error: no files matching '{pattern}' found.", file=sys.stderr)
+        sys.exit(1)
+    return files
