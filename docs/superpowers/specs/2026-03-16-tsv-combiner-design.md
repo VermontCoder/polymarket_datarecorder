@@ -122,10 +122,10 @@ Dropped (no close):    12
 Processing time:      1.3s
 
 Date ranges by source file:
-  btc_polymarket_20260314_132259.tsv   2026-03-14T17:22:59Z → 2026-03-14T23:59:51Z
-  btc_polymarket_20260314_210528.tsv   2026-03-14T21:05:28Z → 2026-03-15T03:12:44Z
-  btc_polymarket_20260315_210627.tsv   2026-03-15T21:06:27Z → 2026-03-16T04:00:03Z
-  btc_polymarket_20260316_093828.tsv   2026-03-16T09:38:29Z → 2026-03-16T13:40:01Z
+  btc_polymarket_20260314_132259.tsv   2026-03-14T17:22:59Z → 2026-03-14T23:59:51Z   6h 36m    78 episodes
+  btc_polymarket_20260314_210528.tsv   2026-03-14T21:05:28Z → 2026-03-15T03:12:44Z   6h 07m    21 episodes
+  btc_polymarket_20260315_210627.tsv   2026-03-15T21:06:27Z → 2026-03-16T04:00:03Z   6h 53m    30 episodes
+  btc_polymarket_20260316_093828.tsv   2026-03-16T09:38:29Z → 2026-03-16T13:40:01Z   4h 01m    13 episodes
 ─────────────────────────────────────────────────────────────────
 ```
 
@@ -133,7 +133,10 @@ Fields:
 - **Episodes written**: count of valid segments written to the output file
 - **Dropped (no close)**: count of segments discarded because no row had `time_to_close < 15000`
 - **Processing time**: wall-clock seconds from script start to file write complete
-- **Date ranges by source file**: for each TSV file, the `timestamp` of its first row → `timestamp` of its last row, as ISO 8601 UTC strings. One line per file, showing coverage and gaps between sessions at a glance.
+- **Date ranges by source file**: one line per TSV file showing:
+  - First row timestamp → last row timestamp (ISO 8601 UTC)
+  - Duration: elapsed time between first and last row, formatted as `Xh YYm`
+  - Episode count: number of valid episodes sourced from that file
 
 ---
 
