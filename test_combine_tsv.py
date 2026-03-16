@@ -394,3 +394,97 @@ class TestFormatDuration(unittest.TestCase):
             "2026-03-14T23:00:00Z", "2026-03-15T01:30:00Z"
         )
         self.assertEqual(result, "2h 30m")
+
+
+COMBINED_FILE = "btc_polymarket_combined.json"
+TSV_DIR = "tsv"
+
+
+@unittest.skipUnless(os.path.exists(COMBINED_FILE),
+                     "combined file not present — run combine_tsv.py first")
+class TestSpotChecks(unittest.TestCase):
+
+    @classmethod
+    def setUpClass(cls):
+        with open(COMBINED_FILE) as f:
+            cls.episodes = [json.loads(b) for b in f.read().strip().split("\n\n")]
+
+    def test_spot_episode_1_first_window(self):
+        """
+        First episode is a partial-start window (17:20-17:25 UTC on 2026-03-14).
+        Expected values are derived directly from the source TSV.
+
+        Source TSV: btc_polymarket_20260314_132259.tsv
+          First row in window: 2026-03-14T17:22:59.879Z  (price_to_beat=70679.78)
+          Last row in window:  2026-03-14T17:24:59.792Z  (current_price=70694.50)
+        """
+        # Read expected values from the source TSV
+        source_path = os.path.join(TSV_DIR, "btc_polymarket_20260314_132259.tsv")
+        rows, _, _ = combine_tsv.read_file_rows(source_path)
+        # Filter to the first window (17:20-17:25 key)
+        first_key = combine_tsv.get_window_key(rows[0]["timestamp"])
+        window_rows = [r for r in rows if combine_tsv.get_window_key(r["timestamp"]) == first_key]
+        expected_start_price = window_rows[0]["price_to_beat"]
+        expected_end_price   = window_rows[-1]["current_price"]
+        expected_outcome     = "UP" if expected_end_price >= expected_start_price else "DOWN"
+        expected_hour        = 17
+        expected_day         = 5   # Saturday: datetime(2026,3,14).weekday() == 5
+
+        ep = self.episodes[0]
+        self.assertEqual(ep["outcome"], expected_outcome)
+        self.assertEqual(ep["hour"], expected_hour)
+        self.assertEqual(ep["day"], expected_day)
+        self.assertAlmostEqual(ep["start_price"], expected_start_price, places=2)
+        self.assertAlmostEqual(ep["end_price"], expected_end_price, places=2)
+
+    def test_spot_episode_2_first_episode_from_file3(self):
+        """
+        First complete episode from btc_polymarket_20260315_210627.tsv.
+        That file's data starts at 2026-03-16T01:06:xx UTC (Monday = day 0).
+        Expected values derived from source TSV.
+        """
+        source_path = os.path.join(TSV_DIR, "btc_polymarket_20260315_210627.tsv")
+        rows, _, _ = combine_tsv.read_file_rows(source_path)
+        first_key = combine_tsv.get_window_key(rows[0]["timestamp"])
+        window_rows = [r for r in rows if combine_tsv.get_window_key(r["timestamp"]) == first_key]
+
+        # This window must be complete (has a near-close row) to appear in output
+        has_close = any(r["time_to_close"] is not None and r["time_to_close"] < 15000
+                        for r in window_rows)
+        if not has_close:
+            self.skipTest("First window of file 3 was incomplete — not in combined output")
+
+        expected_start_price = window_rows[0]["price_to_beat"]
+        expected_end_price   = window_rows[-1]["current_price"]
+        expected_outcome     = "UP" if expected_end_price >= expected_start_price else "DOWN"
+
+        # Find matching episode: first row must fall within file 3's timestamp range
+        _, first_ts, last_ts = combine_tsv.read_file_rows(source_path)
+        ep = next((e for e in self.episodes
+                   if first_ts <= e["rows"][0]["timestamp"] <= last_ts), None)
+        self.assertIsNotNone(ep, "No episode found from file 3")
+
+        self.assertEqual(ep["hour"], 1)    # 01:xx UTC
+        self.assertEqual(ep["day"], 0)     # Monday: datetime(2026,3,16).weekday() == 0
+        self.assertEqual(ep["outcome"], expected_outcome)
+        self.assertAlmostEqual(ep["start_price"], expected_start_price, places=2)
+        self.assertAlmostEqual(ep["end_price"], expected_end_price, places=2)
+
+    def test_spot_episode_3_last_episode(self):
+        """
+        Last episode in combined output comes from btc_polymarket_20260316_093828.tsv.
+        Verifies end_price matches the last row's current_price in that episode,
+        and that the episode's last row exists verbatim in the source TSV.
+        """
+        source_path = os.path.join(TSV_DIR, "btc_polymarket_20260316_093828.tsv")
+        rows, _, _ = combine_tsv.read_file_rows(source_path)
+
+        ep = self.episodes[-1]
+        # end_price must be consistent within the episode itself
+        self.assertAlmostEqual(ep["end_price"], ep["rows"][-1]["current_price"], places=4)
+
+        # The episode's last row must exist verbatim in the source file
+        last_ts = ep["rows"][-1]["timestamp"]
+        source_row = next((r for r in rows if r["timestamp"] == last_ts), None)
+        self.assertIsNotNone(source_row, f"Episode last row {last_ts} not found in source TSV")
+        self.assertAlmostEqual(ep["end_price"], source_row["current_price"], places=4)
