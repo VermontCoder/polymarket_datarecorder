@@ -46,3 +46,19 @@ def get_window_key(timestamp: str) -> tuple:
     """Return the 5-minute window key (y, m, d, h, floored_minute) for a UTC timestamp."""
     dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     return (dt.year, dt.month, dt.day, dt.hour, (dt.minute // 5) * 5)
+
+
+def segment_rows(rows: list[dict]) -> list[list[dict]]:
+    """Group a flat list of parsed rows into 5-minute segments by clock boundary."""
+    if not rows:
+        return []
+    segments = []
+    current = [rows[0]]
+    for row in rows[1:]:
+        if get_window_key(row["timestamp"]) != get_window_key(current[-1]["timestamp"]):
+            segments.append(current)
+            current = [row]
+        else:
+            current.append(row)
+    segments.append(current)
+    return segments

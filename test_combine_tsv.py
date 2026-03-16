@@ -81,3 +81,63 @@ class TestGetWindowKey(unittest.TestCase):
         key1 = combine_tsv.get_window_key("2026-03-14T17:23:01.761Z")
         key2 = combine_tsv.get_window_key("2026-03-14T17:24:59.792Z")
         self.assertEqual(key1, key2)
+
+
+def _make_parsed_row(timestamp, price_to_beat=70000.0, current_price=70010.0, time_to_close=100000):
+    """Helper: return a minimal parsed row dict."""
+    return {
+        "timestamp": timestamp,
+        "up_bid": 55.0, "up_ask": 56.0,
+        "down_bid": 44.0, "down_ask": 45.0,
+        "price_to_beat": price_to_beat,
+        "current_price": current_price,
+        "diff_pct": 0.01, "diff_usd": 10.0,
+        "time_to_close": time_to_close,
+    }
+
+
+class TestSegmentRows(unittest.TestCase):
+
+    def test_single_segment(self):
+        rows = [
+            _make_parsed_row("2026-03-14T17:23:01Z"),
+            _make_parsed_row("2026-03-14T17:23:03Z"),
+            _make_parsed_row("2026-03-14T17:24:59Z"),
+        ]
+        segments = combine_tsv.segment_rows(rows)
+        self.assertEqual(len(segments), 1)
+        self.assertEqual(len(segments[0]), 3)
+
+    def test_two_segments_at_clock_boundary(self):
+        rows = [
+            _make_parsed_row("2026-03-14T17:24:59Z"),  # last row of 17:20 window
+            _make_parsed_row("2026-03-14T17:25:01Z"),  # first row of 17:25 window
+        ]
+        segments = combine_tsv.segment_rows(rows)
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(segments[0][0]["timestamp"], "2026-03-14T17:24:59Z")
+        self.assertEqual(segments[1][0]["timestamp"], "2026-03-14T17:25:01Z")
+
+    def test_boundary_row_belongs_to_new_segment(self):
+        rows = [
+            _make_parsed_row("2026-03-14T17:24:55Z"),
+            _make_parsed_row("2026-03-14T17:24:59Z"),  # last of old window
+            _make_parsed_row("2026-03-14T17:25:01Z"),  # first of new window
+            _make_parsed_row("2026-03-14T17:25:03Z"),
+        ]
+        segments = combine_tsv.segment_rows(rows)
+        self.assertEqual(len(segments), 2)
+        self.assertEqual(len(segments[0]), 2)  # rows at :55 and :59
+        self.assertEqual(len(segments[1]), 2)  # rows at :01 and :03
+
+    def test_same_price_to_beat_across_boundary_still_splits(self):
+        # Even if price_to_beat is identical, the clock boundary splits segments
+        rows = [
+            _make_parsed_row("2026-03-14T17:24:59Z", price_to_beat=70000.0),
+            _make_parsed_row("2026-03-14T17:25:01Z", price_to_beat=70000.0),
+        ]
+        segments = combine_tsv.segment_rows(rows)
+        self.assertEqual(len(segments), 2)
+
+    def test_empty_input(self):
+        self.assertEqual(combine_tsv.segment_rows([]), [])
