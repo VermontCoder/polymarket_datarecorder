@@ -134,18 +134,12 @@ def annotate_cross_episode(episodes: list[dict]) -> list[dict]:
       diff_pct_hour          : (start_price - hour_ago_start_price) / hour_ago_start_price
                                where hour_ago is the session whose session_id is exactly
                                1 hour before this one (None if that session doesn't exist)
-      avg_pct_variance_hour  : average of |diff_pct| (last row) across all episodes whose
-                               session_id falls in the clock hour immediately before this
-                               episode's clock hour (None if no such episodes exist)
+      avg_pct_variance_hour  : rolling average of |diff_pct| (last row) across the
+                               12 five-minute slots immediately before this episode
+                               (T-5m, T-10m, … T-60m); only slots that exist are included
+                               (None if none of the prior 12 slots exist)
     """
     by_session = {ep["session_id"]: ep for ep in episodes}
-
-    # Group episodes by (date, clock_hour) for avg_pct_variance_hour lookup
-    by_clock_hour: dict[tuple, list[dict]] = {}
-    for ep in episodes:
-        dt = datetime.fromisoformat(ep["session_id"].replace("Z", "+00:00"))
-        key = (dt.year, dt.month, dt.day, dt.hour)
-        by_clock_hour.setdefault(key, []).append(ep)
 
     for i, ep in enumerate(episodes):
         ep["diff_pct_prev_session"] = (
@@ -159,15 +153,16 @@ def annotate_cross_episode(episodes: list[dict]) -> list[dict]:
             if prev_hour_ep else None
         )
 
-        prev_hour_dt = dt - timedelta(hours=1)
-        prev_hour_key = (prev_hour_dt.year, prev_hour_dt.month, prev_hour_dt.day, prev_hour_dt.hour)
-        prev_hour_episodes = by_clock_hour.get(prev_hour_key, [])
-        if prev_hour_episodes:
-            values = [abs(e["rows"][-1]["diff_pct"]) for e in prev_hour_episodes
-                      if e["rows"][-1]["diff_pct"] is not None]
-            ep["avg_pct_variance_hour"] = sum(values) / len(values) if values else None
-        else:
-            ep["avg_pct_variance_hour"] = None
+        prior_slots = [
+            (dt - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:00Z")
+            for m in range(5, 65, 5)
+        ]
+        values = [
+            abs(by_session[sid]["rows"][-1]["diff_pct"])
+            for sid in prior_slots
+            if sid in by_session and by_session[sid]["rows"][-1]["diff_pct"] is not None
+        ]
+        ep["avg_pct_variance_hour"] = sum(values) / len(values) if values else None
 
     return episodes
 

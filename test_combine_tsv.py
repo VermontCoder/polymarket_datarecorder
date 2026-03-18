@@ -382,39 +382,51 @@ class TestAnnotateCrossEpisode(unittest.TestCase):
         result = combine_tsv.annotate_cross_episode(episodes)
         self.assertIsNone(result[1]["diff_pct_hour"])
 
-    def test_avg_pct_variance_hour_none_when_no_prior_hour_episodes(self):
+    def test_avg_pct_variance_hour_none_when_no_prior_slots_exist(self):
         episodes = [self._make_episode("2026-03-14T17:20:00Z")]
         result = combine_tsv.annotate_cross_episode(episodes)
         self.assertIsNone(result[0]["avg_pct_variance_hour"])
 
-    def test_avg_pct_variance_hour_averages_absolute_diff_pct_from_prior_clock_hour(self):
-        # Two episodes in hour 16, one in hour 17.
-        # avg_pct_variance_hour for hour-17 episode = mean(|0.02|, |-0.04|) = 0.03
-        episodes = [
-            self._make_episode("2026-03-14T16:00:00Z", diff_pct_last_row=0.02),
-            self._make_episode("2026-03-14T16:05:00Z", diff_pct_last_row=-0.04),
-            self._make_episode("2026-03-14T17:00:00Z"),
-        ]
-        result = combine_tsv.annotate_cross_episode(episodes)
-        self.assertAlmostEqual(result[2]["avg_pct_variance_hour"], 0.03)
-
     def test_avg_pct_variance_hour_uses_absolute_value(self):
-        # Negative diff_pct should be treated as positive for the average
+        # Prior slot at T-5m has negative diff_pct — should be treated as positive
         episodes = [
-            self._make_episode("2026-03-14T16:00:00Z", diff_pct_last_row=-0.05),
-            self._make_episode("2026-03-14T17:00:00Z"),
+            self._make_episode("2026-03-14T17:00:00Z", diff_pct_last_row=-0.05),
+            self._make_episode("2026-03-14T17:05:00Z"),
         ]
         result = combine_tsv.annotate_cross_episode(episodes)
         self.assertAlmostEqual(result[1]["avg_pct_variance_hour"], 0.05)
 
-    def test_avg_pct_variance_hour_does_not_include_same_hour_episodes(self):
-        # Episodes in hour 17 should NOT count toward the avg for another hour-17 episode
+    def test_avg_pct_variance_hour_averages_present_prior_slots(self):
+        # Episode at 17:10 has two prior slots: 17:05 (diff=-0.04) and 17:00 (diff=0.02)
+        # avg = mean(0.04, 0.02) = 0.03
         episodes = [
-            self._make_episode("2026-03-14T17:00:00Z", diff_pct_last_row=9999.0),
+            self._make_episode("2026-03-14T17:00:00Z", diff_pct_last_row=0.02),
+            self._make_episode("2026-03-14T17:05:00Z", diff_pct_last_row=-0.04),
+            self._make_episode("2026-03-14T17:10:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertAlmostEqual(result[2]["avg_pct_variance_hour"], 0.03)
+
+    def test_avg_pct_variance_hour_is_rolling(self):
+        # Two episodes in the same clock hour must get different values as the window shifts
+        episodes = [
+            self._make_episode("2026-03-14T17:00:00Z", diff_pct_last_row=0.02),
+            self._make_episode("2026-03-14T17:05:00Z", diff_pct_last_row=-0.04),
+            self._make_episode("2026-03-14T17:10:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        # 17:05 sees only 17:00 (T-5m) → 0.02
+        self.assertAlmostEqual(result[1]["avg_pct_variance_hour"], 0.02)
+        # 17:10 sees 17:05 (T-5m) and 17:00 (T-10m) → mean(0.04, 0.02) = 0.03
+        self.assertAlmostEqual(result[2]["avg_pct_variance_hour"], 0.03)
+
+    def test_avg_pct_variance_hour_excludes_slots_beyond_60_minutes(self):
+        # Episode at 17:05 has a prior episode at 16:00 (65 min back — outside window)
+        episodes = [
+            self._make_episode("2026-03-14T16:00:00Z", diff_pct_last_row=9999.0),
             self._make_episode("2026-03-14T17:05:00Z"),
         ]
         result = combine_tsv.annotate_cross_episode(episodes)
-        # hour 16 has no episodes → still None
         self.assertIsNone(result[1]["avg_pct_variance_hour"])
 
 
