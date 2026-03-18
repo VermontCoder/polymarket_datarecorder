@@ -18,7 +18,8 @@ from datetime import datetime, timedelta, timezone
 TSV_DIR     = "tsv"
 TSV_PATTERN = "btc_polymarket_*.tsv"
 OUTPUT_DIR  = "data"
-CLOSE_THRESHOLD_MS = 15_000  # segment must have a row within 15s of close
+CLOSE_THRESHOLD_MS        = 15_000  # segment must have a row within 15s of close
+STRAY_CLOSE_THRESHOLD_MS  =  5_000  # first-row time_to_close below this → belongs to prev segment
 
 _COLUMNS = [
     "timestamp", "up_bid", "up_ask", "down_bid", "down_ask",
@@ -64,6 +65,33 @@ def segment_rows(rows: list[dict]) -> list[list[dict]]:
     return segments
 
 
+def reassign_stray_close_rows(segments: list[list[dict]]) -> list[list[dict]]:
+    """
+    Fix misassigned closing rows caused by clock-boundary misalignment.
+
+    If the first row of a segment has a time_to_close below STRAY_CLOSE_THRESHOLD_MS
+    it cannot be the opening row of a new 5-minute market; it belongs to the previous
+    segment's close. Move it there. If the segment becomes empty after the move,
+    remove it entirely.
+    """
+    if not segments:
+        return segments
+    result = [list(seg) for seg in segments]
+    i = 0
+    while i < len(result):
+        first = result[i][0]
+        if first["time_to_close"] is not None and first["time_to_close"] < STRAY_CLOSE_THRESHOLD_MS:
+            if i == 0:
+                result[i].pop(0)          # no previous segment — discard
+            else:
+                result[i - 1].append(result[i].pop(0))
+            if not result[i]:
+                result.pop(i)
+                continue
+        i += 1
+    return result
+
+
 def filter_segments(segments: list[list[dict]]) -> tuple[list[list[dict]], int]:
     """
     Discard segments with no near-close row.
@@ -100,14 +128,24 @@ def annotate_segment(rows: list[dict]) -> dict:
 
 def annotate_cross_episode(episodes: list[dict]) -> list[dict]:
     """
-    Add two cross-episode fields to each episode (mutates in place):
-      diff_pct_prev_session : diff_pct from the last row of the previous episode
-                              (None for the first episode)
-      diff_pct_hour         : (start_price - hour_ago_start_price) / hour_ago_start_price
-                              where hour_ago is the session whose session_id is exactly
-                              1 hour before this one (None if that session doesn't exist)
+    Add three cross-episode fields to each episode (mutates in place):
+      diff_pct_prev_session  : diff_pct from the last row of the previous episode
+                               (None for the first episode)
+      diff_pct_hour          : (start_price - hour_ago_start_price) / hour_ago_start_price
+                               where hour_ago is the session whose session_id is exactly
+                               1 hour before this one (None if that session doesn't exist)
+      avg_pct_variance_hour  : average of |diff_pct| (last row) across all episodes whose
+                               session_id falls in the clock hour immediately before this
+                               episode's clock hour (None if no such episodes exist)
     """
     by_session = {ep["session_id"]: ep for ep in episodes}
+
+    # Group episodes by (date, clock_hour) for avg_pct_variance_hour lookup
+    by_clock_hour: dict[tuple, list[dict]] = {}
+    for ep in episodes:
+        dt = datetime.fromisoformat(ep["session_id"].replace("Z", "+00:00"))
+        key = (dt.year, dt.month, dt.day, dt.hour)
+        by_clock_hour.setdefault(key, []).append(ep)
 
     for i, ep in enumerate(episodes):
         ep["diff_pct_prev_session"] = (
@@ -120,6 +158,16 @@ def annotate_cross_episode(episodes: list[dict]) -> list[dict]:
             (ep["start_price"] - prev_hour_ep["start_price"]) / prev_hour_ep["start_price"] * 100
             if prev_hour_ep else None
         )
+
+        prev_hour_dt = dt - timedelta(hours=1)
+        prev_hour_key = (prev_hour_dt.year, prev_hour_dt.month, prev_hour_dt.day, prev_hour_dt.hour)
+        prev_hour_episodes = by_clock_hour.get(prev_hour_key, [])
+        if prev_hour_episodes:
+            values = [abs(e["rows"][-1]["diff_pct"]) for e in prev_hour_episodes
+                      if e["rows"][-1]["diff_pct"] is not None]
+            ep["avg_pct_variance_hour"] = sum(values) / len(values) if values else None
+        else:
+            ep["avg_pct_variance_hour"] = None
 
     return episodes
 
@@ -137,6 +185,7 @@ def format_output(episodes: list[dict]) -> str:
             "end_price":             ep["end_price"],
             "diff_pct_prev_session": ep["diff_pct_prev_session"],
             "diff_pct_hour":         ep["diff_pct_hour"],
+            "avg_pct_variance_hour": ep["avg_pct_variance_hour"],
             "rows": [
                 {k: v for k, v in row.items() if k != "price_to_beat"}
                 for row in ep["rows"]
@@ -225,6 +274,7 @@ def main():
         all_rows.extend(rows)
 
     segments = segment_rows(all_rows)
+    segments = reassign_stray_close_rows(segments)
     kept, dropped = filter_segments(segments)
     episodes = annotate_cross_episode([annotate_segment(seg) for seg in kept])
 

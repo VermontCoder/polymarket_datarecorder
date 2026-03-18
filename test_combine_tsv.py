@@ -143,6 +143,78 @@ class TestSegmentRows(unittest.TestCase):
         self.assertEqual(combine_tsv.segment_rows([]), [])
 
 
+class TestReassignStrayCloseRows(unittest.TestCase):
+
+    def test_stray_close_row_moved_to_prev_segment(self):
+        # First row of seg2 has time_to_close=200ms → belongs to seg1
+        seg1 = [_make_parsed_row("2026-03-14T17:24:55Z", time_to_close=8000)]
+        seg2 = [
+            _make_parsed_row("2026-03-14T17:25:00Z", time_to_close=200),   # stray close
+            _make_parsed_row("2026-03-14T17:25:03Z", time_to_close=297000),
+        ]
+        result = combine_tsv.reassign_stray_close_rows([seg1, seg2])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result[0]), 2)   # stray row moved here
+        self.assertEqual(result[0][-1]["timestamp"], "2026-03-14T17:25:00Z")
+        self.assertEqual(len(result[1]), 1)   # remaining row stays
+
+    def test_normal_segments_unchanged(self):
+        seg1 = [_make_parsed_row("2026-03-14T17:24:55Z", time_to_close=8000)]
+        seg2 = [_make_parsed_row("2026-03-14T17:25:03Z", time_to_close=297000)]
+        result = combine_tsv.reassign_stray_close_rows([seg1, seg2])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result[0]), 1)
+        self.assertEqual(len(result[1]), 1)
+
+    def test_stray_row_is_only_row_segment_removed(self):
+        # seg2 consists solely of a stray close row → segment is dropped entirely
+        seg1 = [_make_parsed_row("2026-03-14T17:24:55Z", time_to_close=8000)]
+        seg2 = [_make_parsed_row("2026-03-14T17:25:00Z", time_to_close=200)]
+        seg3 = [_make_parsed_row("2026-03-14T17:30:03Z", time_to_close=297000)]
+        result = combine_tsv.reassign_stray_close_rows([seg1, seg2, seg3])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0][-1]["timestamp"], "2026-03-14T17:25:00Z")
+        self.assertEqual(result[1][0]["timestamp"], "2026-03-14T17:30:03Z")
+
+    def test_first_segment_stray_row_deleted(self):
+        # No previous segment to receive it — row is discarded
+        seg1 = [
+            _make_parsed_row("2026-03-14T17:25:00Z", time_to_close=200),
+            _make_parsed_row("2026-03-14T17:25:03Z", time_to_close=297000),
+        ]
+        seg2 = [_make_parsed_row("2026-03-14T17:30:03Z", time_to_close=297000)]
+        result = combine_tsv.reassign_stray_close_rows([seg1, seg2])
+        self.assertEqual(len(result), 2)
+        self.assertEqual(len(result[0]), 1)
+        self.assertEqual(result[0][0]["timestamp"], "2026-03-14T17:25:03Z")
+
+    def test_first_segment_only_stray_row_segment_removed(self):
+        # Stray row is the only row in the first segment → segment dropped entirely
+        seg1 = [_make_parsed_row("2026-03-14T17:25:00Z", time_to_close=200)]
+        seg2 = [_make_parsed_row("2026-03-14T17:30:03Z", time_to_close=297000)]
+        result = combine_tsv.reassign_stray_close_rows([seg1, seg2])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0][0]["timestamp"], "2026-03-14T17:30:03Z")
+
+    def test_single_segment_stray_row_deleted(self):
+        # Single segment with a stray row — row is discarded, segment removed
+        seg1 = [_make_parsed_row("2026-03-14T17:25:00Z", time_to_close=200)]
+        result = combine_tsv.reassign_stray_close_rows([seg1])
+        self.assertEqual(len(result), 0)
+
+    def test_none_time_to_close_not_treated_as_stray(self):
+        seg1 = [_make_parsed_row("2026-03-14T17:24:55Z", time_to_close=8000)]
+        seg2 = [
+            _make_parsed_row("2026-03-14T17:25:00Z", time_to_close=None),
+            _make_parsed_row("2026-03-14T17:25:03Z", time_to_close=297000),
+        ]
+        # Patch None into the row
+        seg2[0]["time_to_close"] = None
+        result = combine_tsv.reassign_stray_close_rows([seg1, seg2])
+        self.assertEqual(len(result[0]), 1)  # nothing moved
+        self.assertEqual(len(result[1]), 2)
+
+
 class TestFilterSegments(unittest.TestCase):
 
     def test_drops_segment_with_no_close_row(self):
@@ -310,6 +382,41 @@ class TestAnnotateCrossEpisode(unittest.TestCase):
         result = combine_tsv.annotate_cross_episode(episodes)
         self.assertIsNone(result[1]["diff_pct_hour"])
 
+    def test_avg_pct_variance_hour_none_when_no_prior_hour_episodes(self):
+        episodes = [self._make_episode("2026-03-14T17:20:00Z")]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertIsNone(result[0]["avg_pct_variance_hour"])
+
+    def test_avg_pct_variance_hour_averages_absolute_diff_pct_from_prior_clock_hour(self):
+        # Two episodes in hour 16, one in hour 17.
+        # avg_pct_variance_hour for hour-17 episode = mean(|0.02|, |-0.04|) = 0.03
+        episodes = [
+            self._make_episode("2026-03-14T16:00:00Z", diff_pct_last_row=0.02),
+            self._make_episode("2026-03-14T16:05:00Z", diff_pct_last_row=-0.04),
+            self._make_episode("2026-03-14T17:00:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertAlmostEqual(result[2]["avg_pct_variance_hour"], 0.03)
+
+    def test_avg_pct_variance_hour_uses_absolute_value(self):
+        # Negative diff_pct should be treated as positive for the average
+        episodes = [
+            self._make_episode("2026-03-14T16:00:00Z", diff_pct_last_row=-0.05),
+            self._make_episode("2026-03-14T17:00:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        self.assertAlmostEqual(result[1]["avg_pct_variance_hour"], 0.05)
+
+    def test_avg_pct_variance_hour_does_not_include_same_hour_episodes(self):
+        # Episodes in hour 17 should NOT count toward the avg for another hour-17 episode
+        episodes = [
+            self._make_episode("2026-03-14T17:00:00Z", diff_pct_last_row=9999.0),
+            self._make_episode("2026-03-14T17:05:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes)
+        # hour 16 has no episodes → still None
+        self.assertIsNone(result[1]["avg_pct_variance_hour"])
+
 
 class TestWriteOutput(unittest.TestCase):
 
@@ -324,6 +431,7 @@ class TestWriteOutput(unittest.TestCase):
             "end_price":             70694.50,
             "diff_pct_prev_session": None,
             "diff_pct_hour":         None,
+            "avg_pct_variance_hour": None,
             "rows": [
                 _make_parsed_row("2026-03-14T17:23:01Z"),
                 _make_parsed_row("2026-03-14T17:24:59Z", time_to_close=1592),
