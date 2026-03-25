@@ -57,6 +57,8 @@ class TestParseRow(unittest.TestCase):
 
 class TestGetWindowKey(unittest.TestCase):
 
+    # --- 5-minute windows (default) ---
+
     def test_window_key_rounds_minute_down(self):
         # 17:23 → window starts at 17:20
         key = combine_tsv.get_window_key("2026-03-14T17:23:01.761Z")
@@ -81,6 +83,28 @@ class TestGetWindowKey(unittest.TestCase):
         key1 = combine_tsv.get_window_key("2026-03-14T17:23:01.761Z")
         key2 = combine_tsv.get_window_key("2026-03-14T17:24:59.792Z")
         self.assertEqual(key1, key2)
+
+    # --- 15-minute windows ---
+
+    def test_15m_window_key_floors_to_nearest_15(self):
+        # 17:23 → window starts at 17:15
+        key = combine_tsv.get_window_key("2026-03-14T17:23:01.000Z", window_min=15)
+        self.assertEqual(key, (2026, 3, 14, 17, 15))
+
+    def test_15m_window_key_at_boundary(self):
+        # 17:30:00 → new window starting at 17:30
+        key = combine_tsv.get_window_key("2026-03-14T17:30:01.000Z", window_min=15)
+        self.assertEqual(key, (2026, 3, 14, 17, 30))
+
+    def test_15m_same_window_gives_same_key(self):
+        key1 = combine_tsv.get_window_key("2026-03-14T17:15:01.000Z", window_min=15)
+        key2 = combine_tsv.get_window_key("2026-03-14T17:29:59.000Z", window_min=15)
+        self.assertEqual(key1, key2)
+
+    def test_15m_different_windows_give_different_keys(self):
+        key1 = combine_tsv.get_window_key("2026-03-14T17:29:59.000Z", window_min=15)
+        key2 = combine_tsv.get_window_key("2026-03-14T17:30:01.000Z", window_min=15)
+        self.assertNotEqual(key1, key2)
 
 
 def _make_parsed_row(timestamp, price_to_beat=70000.0, current_price=70010.0, time_to_close=100000):
@@ -141,6 +165,23 @@ class TestSegmentRows(unittest.TestCase):
 
     def test_empty_input(self):
         self.assertEqual(combine_tsv.segment_rows([]), [])
+
+    def test_15m_splits_at_15_minute_boundary(self):
+        rows = [
+            _make_parsed_row("2026-03-14T17:29:59Z"),  # last of 17:15 window
+            _make_parsed_row("2026-03-14T17:30:01Z"),  # first of 17:30 window
+        ]
+        segments = combine_tsv.segment_rows(rows, window_min=15)
+        self.assertEqual(len(segments), 2)
+
+    def test_15m_rows_within_window_not_split(self):
+        rows = [
+            _make_parsed_row("2026-03-14T17:15:01Z"),
+            _make_parsed_row("2026-03-14T17:22:00Z"),
+            _make_parsed_row("2026-03-14T17:29:59Z"),
+        ]
+        segments = combine_tsv.segment_rows(rows, window_min=15)
+        self.assertEqual(len(segments), 1)
 
 
 class TestReassignStrayCloseRows(unittest.TestCase):
@@ -323,11 +364,17 @@ class TestAnnotateSegment(unittest.TestCase):
         self.assertEqual(episode["rows"][0]["timestamp"], "2026-03-14T17:23:01Z")
         self.assertEqual(episode["rows"][1]["timestamp"], "2026-03-14T17:23:03Z")
 
-    def test_session_id_is_window_start(self):
+    def test_session_id_is_window_start_5m(self):
         # 17:23 UTC → window starts at 17:20 → session_id = "2026-03-14T17:20:00Z"
         rows = [_make_parsed_row("2026-03-14T17:23:01Z")]
         episode = combine_tsv.annotate_segment(rows)
         self.assertEqual(episode["session_id"], "2026-03-14T17:20:00Z")
+
+    def test_session_id_is_window_start_15m(self):
+        # 17:23 UTC → 15m window starts at 17:15 → session_id = "2026-03-14T17:15:00Z"
+        rows = [_make_parsed_row("2026-03-14T17:23:01Z")]
+        episode = combine_tsv.annotate_segment(rows, window_min=15)
+        self.assertEqual(episode["session_id"], "2026-03-14T17:15:00Z")
 
 
 class TestAnnotateCrossEpisode(unittest.TestCase):
@@ -430,6 +477,66 @@ class TestAnnotateCrossEpisode(unittest.TestCase):
         self.assertIsNone(result[1]["avg_pct_variance_hour"])
 
 
+class TestAnnotateCrossEpisode15m(unittest.TestCase):
+    """Cross-episode annotation for 15-minute market windows."""
+
+    def _make_episode(self, session_id, start_price=80000.0, diff_pct_last_row=0.01):
+        return {
+            "session_id":  session_id,
+            "outcome":     "UP",
+            "hour":        int(session_id[11:13]),
+            "day":         0,
+            "start_price": start_price,
+            "end_price":   start_price + 10,
+            "rows": [
+                _make_parsed_row("2026-03-14T17:16:01Z"),
+                {**_make_parsed_row("2026-03-14T17:29:59Z", time_to_close=1592),
+                 "diff_pct": diff_pct_last_row},
+            ],
+        }
+
+    def test_avg_pct_variance_uses_15m_steps(self):
+        # Episode at 18:00 with only T-15m slot present (17:45)
+        episodes = [
+            self._make_episode("2026-03-14T17:45:00Z", diff_pct_last_row=0.06),
+            self._make_episode("2026-03-14T18:00:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes, window_min=15)
+        self.assertAlmostEqual(result[1]["avg_pct_variance_hour"], 0.06)
+
+    def test_avg_pct_variance_four_slots_within_hour(self):
+        # Episode at 18:00 with all 4 prior 15m slots
+        # slots: T-15m=17:45, T-30m=17:30, T-45m=17:15, T-60m=17:00
+        episodes = [
+            self._make_episode("2026-03-14T17:00:00Z", diff_pct_last_row=0.02),
+            self._make_episode("2026-03-14T17:15:00Z", diff_pct_last_row=0.04),
+            self._make_episode("2026-03-14T17:30:00Z", diff_pct_last_row=0.06),
+            self._make_episode("2026-03-14T17:45:00Z", diff_pct_last_row=0.08),
+            self._make_episode("2026-03-14T18:00:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes, window_min=15)
+        # avg = (0.02 + 0.04 + 0.06 + 0.08) / 4 = 0.05
+        self.assertAlmostEqual(result[4]["avg_pct_variance_hour"], 0.05)
+
+    def test_avg_pct_variance_excludes_slot_beyond_60_min(self):
+        # Episode at 18:00, prior at 16:45 (75 min back — outside 60-min window)
+        episodes = [
+            self._make_episode("2026-03-14T16:45:00Z", diff_pct_last_row=9999.0),
+            self._make_episode("2026-03-14T18:00:00Z"),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes, window_min=15)
+        self.assertIsNone(result[1]["avg_pct_variance_hour"])
+
+    def test_diff_pct_hour_works_for_15m_windows(self):
+        # Both sessions are 1 hour apart, aligned to 15m boundaries
+        episodes = [
+            self._make_episode("2026-03-14T16:15:00Z", start_price=80000.0),
+            self._make_episode("2026-03-14T17:15:00Z", start_price=81600.0),
+        ]
+        result = combine_tsv.annotate_cross_episode(episodes, window_min=15)
+        self.assertAlmostEqual(result[1]["diff_pct_hour"], 2.0)  # (81600-80000)/80000*100
+
+
 class TestWriteOutput(unittest.TestCase):
 
     def _make_episode(self, outcome="UP", hour=17, day=5,
@@ -492,19 +599,25 @@ class TestCollectFiles(unittest.TestCase):
 
     def test_returns_sorted_list(self):
         with tempfile.TemporaryDirectory() as d:
-            # Create two fake TSV files
-            for name in ["btc_polymarket_20260315_120000.tsv",
-                         "btc_polymarket_20260314_090000.tsv"]:
+            for name in ["btc_updown_15m_20260315_120000.tsv",
+                         "btc_updown_15m_20260314_090000.tsv"]:
                 open(os.path.join(d, name), "w").close()
             result = combine_tsv.collect_files(d)
         basenames = [os.path.basename(f) for f in result]
         self.assertEqual(basenames, sorted(basenames))
 
-    def test_raises_on_no_files(self):
+    def test_no_files_returns_empty_list(self):
         with tempfile.TemporaryDirectory() as d:
-            with self.assertRaises(SystemExit) as ctx:
-                combine_tsv.collect_files(d)
-            self.assertNotEqual(ctx.exception.code, 0)
+            result = combine_tsv.collect_files(d)
+            self.assertEqual(result, [])
+
+    def test_only_tsv_files_returned(self):
+        with tempfile.TemporaryDirectory() as d:
+            open(os.path.join(d, "data.tsv"), "w").close()
+            open(os.path.join(d, "readme.txt"), "w").close()
+            result = combine_tsv.collect_files(d)
+        self.assertEqual(len(result), 1)
+        self.assertTrue(result[0].endswith(".tsv"))
 
 
 class TestReadFileRows(unittest.TestCase):
@@ -570,103 +683,3 @@ class TestFormatDuration(unittest.TestCase):
             "2026-03-14T23:00:00Z", "2026-03-15T01:30:00Z"
         )
         self.assertEqual(result, "2h 30m")
-
-
-import glob as _glob
-
-def _find_latest_combined():
-    files = sorted(_glob.glob("data/btc_polymarket_combined_*.json"))
-    return files[-1] if files else None
-
-COMBINED_FILE = _find_latest_combined()
-TSV_DIR = "tsv"
-
-
-@unittest.skipUnless(COMBINED_FILE is not None,
-                     "combined file not present — run combine_tsv.py first")
-class TestSpotChecks(unittest.TestCase):
-
-    @classmethod
-    def setUpClass(cls):
-        with open(COMBINED_FILE) as f:
-            cls.episodes = json.load(f)
-
-    def test_spot_episode_1_first_window(self):
-        """
-        First episode is a partial-start window (17:20-17:25 UTC on 2026-03-14).
-        Expected values are derived directly from the source TSV.
-
-        Source TSV: btc_polymarket_20260314_132259.tsv
-          First row in window: 2026-03-14T17:22:59.879Z  (price_to_beat=70679.78)
-          Last row in window:  2026-03-14T17:24:59.792Z  (current_price=70694.50)
-        """
-        # Read expected values from the source TSV
-        source_path = os.path.join(TSV_DIR, "btc_polymarket_20260314_132259.tsv")
-        rows, _, _ = combine_tsv.read_file_rows(source_path)
-        # Filter to the first window (17:20-17:25 key)
-        first_key = combine_tsv.get_window_key(rows[0]["timestamp"])
-        window_rows = [r for r in rows if combine_tsv.get_window_key(r["timestamp"]) == first_key]
-        expected_start_price = window_rows[0]["price_to_beat"]
-        expected_end_price   = window_rows[-1]["current_price"]
-        expected_outcome     = "UP" if expected_end_price >= expected_start_price else "DOWN"
-        expected_hour        = 17
-        expected_day         = 5   # Saturday: datetime(2026,3,14).weekday() == 5
-
-        ep = self.episodes[0]
-        self.assertEqual(ep["outcome"], expected_outcome)
-        self.assertEqual(ep["hour"], expected_hour)
-        self.assertEqual(ep["day"], expected_day)
-        self.assertAlmostEqual(ep["start_price"], expected_start_price, places=2)
-        self.assertAlmostEqual(ep["end_price"], expected_end_price, places=2)
-
-    def test_spot_episode_2_first_episode_from_file3(self):
-        """
-        First complete episode from btc_polymarket_20260315_210627.tsv.
-        That file's data starts at 2026-03-16T01:06:xx UTC (Monday = day 0).
-        Expected values derived from source TSV.
-        """
-        source_path = os.path.join(TSV_DIR, "btc_polymarket_20260315_210627.tsv")
-        rows, _, _ = combine_tsv.read_file_rows(source_path)
-        first_key = combine_tsv.get_window_key(rows[0]["timestamp"])
-        window_rows = [r for r in rows if combine_tsv.get_window_key(r["timestamp"]) == first_key]
-
-        # This window must be complete (has a near-close row) to appear in output
-        has_close = any(r["time_to_close"] is not None and r["time_to_close"] < 15000
-                        for r in window_rows)
-        if not has_close:
-            self.skipTest("First window of file 3 was incomplete — not in combined output")
-
-        expected_start_price = window_rows[0]["price_to_beat"]
-        expected_end_price   = window_rows[-1]["current_price"]
-        expected_outcome     = "UP" if expected_end_price >= expected_start_price else "DOWN"
-
-        # Find matching episode: first row must fall within file 3's timestamp range
-        _, first_ts, last_ts = combine_tsv.read_file_rows(source_path)
-        ep = next((e for e in self.episodes
-                   if first_ts <= e["rows"][0]["timestamp"] <= last_ts), None)
-        self.assertIsNotNone(ep, "No episode found from file 3")
-
-        self.assertEqual(ep["hour"], 1)    # 01:xx UTC
-        self.assertEqual(ep["day"], 0)     # Monday: datetime(2026,3,16).weekday() == 0
-        self.assertEqual(ep["outcome"], expected_outcome)
-        self.assertAlmostEqual(ep["start_price"], expected_start_price, places=2)
-        self.assertAlmostEqual(ep["end_price"], expected_end_price, places=2)
-
-    def test_spot_episode_3_last_episode(self):
-        """
-        Last episode in combined output comes from btc_polymarket_20260316_093828.tsv.
-        Verifies end_price matches the last row's current_price in that episode,
-        and that the episode's last row exists verbatim in the source TSV.
-        """
-        source_path = os.path.join(TSV_DIR, "btc_polymarket_20260316_093828.tsv")
-        rows, _, _ = combine_tsv.read_file_rows(source_path)
-
-        ep = self.episodes[-1]
-        # end_price must be consistent within the episode itself
-        self.assertAlmostEqual(ep["end_price"], ep["rows"][-1]["current_price"], places=4)
-
-        # The episode's last row must exist verbatim in the source file
-        last_ts = ep["rows"][-1]["timestamp"]
-        source_row = next((r for r in rows if r["timestamp"] == last_ts), None)
-        self.assertIsNotNone(source_row, f"Episode last row {last_ts} not found in source TSV")
-        self.assertAlmostEqual(ep["end_price"], source_row["current_price"], places=4)

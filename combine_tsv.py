@@ -1,8 +1,13 @@
 """
 combine_tsv.py
 --------------
-Merges all Polymarket BTC 5-minute TSV snapshot files into a single
-JSON episode file for reinforcement learning training.
+Merges all Polymarket TSV snapshot files into per-market JSON episode files
+for reinforcement learning training.
+
+Supported markets:
+  - BTC 15-minute  (tsv/btc-15/ → data/btc_15_combined_*.json)
+  - ETH 15-minute  (tsv/eth-15/ → data/eth_15_combined_*.json)
+  - ETH 5-minute   (tsv/eth-5/  → data/eth_5_combined_*.json)
 
 Usage:
     python combine_tsv.py
@@ -13,17 +18,32 @@ import json
 import os
 import time
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-TSV_DIR     = "tsv"
-TSV_PATTERN = "btc_polymarket_*.tsv"
-OUTPUT_DIR  = "data"
-CLOSE_THRESHOLD_MS        = 15_000  # segment must have a row within 15s of close
-STRAY_CLOSE_THRESHOLD_MS  =  5_000  # first-row time_to_close below this → belongs to prev segment
+TSV_DIR    = "tsv"
+OUTPUT_DIR = "data"
+CLOSE_THRESHOLD_MS       = 15_000  # segment must have a row within 15s of close
+STRAY_CLOSE_THRESHOLD_MS =  5_000  # first-row time_to_close below this → belongs to prev segment
 
 _COLUMNS = [
     "timestamp", "up_bid", "up_ask", "down_bid", "down_ask",
     "price_to_beat", "current_price", "diff_pct", "diff_usd", "time_to_close",
+]
+
+
+@dataclass
+class MarketConfig:
+    name:          str   # display label, e.g. "BTC-15m"
+    tsv_subdir:    str   # subdirectory under TSV_DIR, e.g. "btc-15"
+    window_min:    int   # market window in minutes: 5 or 15
+    output_prefix: str   # output filename prefix, e.g. "btc_15"
+
+
+MARKETS = [
+    MarketConfig(name="BTC-15m", tsv_subdir="btc-15", window_min=15, output_prefix="btc_15"),
+    MarketConfig(name="ETH-15m", tsv_subdir="eth-15", window_min=15, output_prefix="eth_15"),
+    MarketConfig(name="ETH-5m",  tsv_subdir="eth-5",  window_min=5,  output_prefix="eth_5"),
 ]
 
 
@@ -43,20 +63,20 @@ def parse_row(line: str) -> dict:
     return row
 
 
-def get_window_key(timestamp: str) -> tuple:
-    """Return the 5-minute window key (y, m, d, h, floored_minute) for a UTC timestamp."""
+def get_window_key(timestamp: str, window_min: int = 5) -> tuple:
+    """Return the window key (y, m, d, h, floored_minute) for a UTC timestamp."""
     dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-    return (dt.year, dt.month, dt.day, dt.hour, (dt.minute // 5) * 5)
+    return (dt.year, dt.month, dt.day, dt.hour, (dt.minute // window_min) * window_min)
 
 
-def segment_rows(rows: list[dict]) -> list[list[dict]]:
-    """Group a flat list of parsed rows into 5-minute segments by clock boundary."""
+def segment_rows(rows: list[dict], window_min: int = 5) -> list[list[dict]]:
+    """Group a flat list of parsed rows into segments by clock boundary."""
     if not rows:
         return []
     segments = []
     current = [rows[0]]
     for row in rows[1:]:
-        if get_window_key(row["timestamp"]) != get_window_key(current[-1]["timestamp"]):
+        if get_window_key(row["timestamp"], window_min) != get_window_key(current[-1]["timestamp"], window_min):
             segments.append(current)
             current = [row]
         else:
@@ -70,7 +90,7 @@ def reassign_stray_close_rows(segments: list[list[dict]]) -> list[list[dict]]:
     Fix misassigned closing rows caused by clock-boundary misalignment.
 
     If the first row of a segment has a time_to_close below STRAY_CLOSE_THRESHOLD_MS
-    it cannot be the opening row of a new 5-minute market; it belongs to the previous
+    it cannot be the opening row of a new market window; it belongs to the previous
     segment's close. Move it there. If the segment becomes empty after the move,
     remove it entirely.
     """
@@ -108,11 +128,11 @@ def filter_segments(segments: list[list[dict]]) -> tuple[list[list[dict]], int]:
     return kept, dropped
 
 
-def annotate_segment(rows: list[dict]) -> dict:
+def annotate_segment(rows: list[dict], window_min: int = 5) -> dict:
     """Compute episode metadata for a validated segment."""
     first, last = rows[0], rows[-1]
     dt = datetime.fromisoformat(first["timestamp"].replace("Z", "+00:00"))
-    key = get_window_key(first["timestamp"])
+    key = get_window_key(first["timestamp"], window_min)
     session_id = f"{key[0]:04d}-{key[1]:02d}-{key[2]:02d}T{key[3]:02d}:{key[4]:02d}:00Z"
     outcome = "UP" if last["current_price"] >= last["price_to_beat"] else "DOWN"
     return {
@@ -126,7 +146,7 @@ def annotate_segment(rows: list[dict]) -> dict:
     }
 
 
-def annotate_cross_episode(episodes: list[dict]) -> list[dict]:
+def annotate_cross_episode(episodes: list[dict], window_min: int = 5) -> list[dict]:
     """
     Add three cross-episode fields to each episode (mutates in place):
       diff_pct_prev_session  : diff_pct from the last row of the previous episode
@@ -134,10 +154,9 @@ def annotate_cross_episode(episodes: list[dict]) -> list[dict]:
       diff_pct_hour          : (start_price - hour_ago_start_price) / hour_ago_start_price
                                where hour_ago is the session whose session_id is exactly
                                1 hour before this one (None if that session doesn't exist)
-      avg_pct_variance_hour  : rolling average of |diff_pct| (last row) across the
-                               12 five-minute slots immediately before this episode
-                               (T-5m, T-10m, … T-60m); only slots that exist are included
-                               (None if none of the prior 12 slots exist)
+      avg_pct_variance_hour  : rolling average of |diff_pct| (last row) across the prior
+                               slots within the last 60 minutes, stepping by window_min
+                               (None if none of the prior slots exist)
     """
     by_session = {ep["session_id"]: ep for ep in episodes}
 
@@ -155,7 +174,7 @@ def annotate_cross_episode(episodes: list[dict]) -> list[dict]:
 
         prior_slots = [
             (dt - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:00Z")
-            for m in range(5, 65, 5)
+            for m in range(window_min, 60 + window_min, window_min)
         ]
         values = [
             abs(by_session[sid]["rows"][-1]["diff_pct"])
@@ -190,14 +209,9 @@ def format_output(episodes: list[dict]) -> str:
     return json.dumps(out, indent=2)
 
 
-def collect_files(tsv_dir: str = TSV_DIR) -> list[str]:
-    """Return sorted list of TSV file paths. Exits with error if none found."""
-    pattern = f"{tsv_dir}/{TSV_PATTERN}"
-    files = sorted(glob.glob(pattern))
-    if not files:
-        print(f"Error: no files matching '{pattern}' found.", file=sys.stderr)
-        sys.exit(1)
-    return files
+def collect_files(tsv_dir: str) -> list[str]:
+    """Return sorted list of *.tsv file paths in tsv_dir. Returns empty list if none found."""
+    return sorted(glob.glob(os.path.join(tsv_dir, "*.tsv")))
 
 
 def read_file_rows(filepath: str) -> tuple[list[dict], str, str]:
@@ -229,12 +243,7 @@ def format_duration(first_ts: str, last_ts: str) -> str:
 def print_stats(files: list[str], file_meta: list[dict],
                 episodes_written: int, dropped: int, elapsed: float,
                 output_file: str = "") -> None:
-    """
-    Print processing summary to stdout.
-
-    file_meta is a list of dicts, one per file:
-        {"name": str, "first_ts": str, "last_ts": str, "episode_count": int}
-    """
+    """Print processing summary to stdout."""
     bar = "-" * 65
     print(bar)
     print(f"Combined: {output_file}")
@@ -252,47 +261,51 @@ def print_stats(files: list[str], file_meta: list[dict],
 
 
 def main():
-    t0 = time.perf_counter()
-    files = collect_files()
-
-    all_rows: list[dict] = []
-    file_meta: list[dict] = []
-
-    for filepath in files:
-        rows, first_ts, last_ts = read_file_rows(filepath)
-        file_meta.append({
-            "name": filepath,
-            "first_ts": first_ts,
-            "last_ts": last_ts,
-            "episode_count": 0,
-        })
-        all_rows.extend(rows)
-
-    segments = segment_rows(all_rows)
-    segments = reassign_stray_close_rows(segments)
-    kept, dropped = filter_segments(segments)
-    episodes = annotate_cross_episode([annotate_segment(seg) for seg in kept])
-
-    # Credit each episode to the source file whose timestamp range contains
-    # the episode's first row. Files are non-overlapping and sorted, so at
-    # most one file will match.
-    for ep in episodes:
-        ep_ts = ep["rows"][0]["timestamp"]
-        for meta in file_meta:
-            if meta["first_ts"] <= ep_ts <= meta["last_ts"]:
-                meta["episode_count"] += 1
-                break
-
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(OUTPUT_DIR, f"btc_polymarket_combined_{ts}.json")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    output_text = format_output(episodes)
-    with open(output_file, "w", encoding="utf-8") as f:
-        f.write(output_text)
+    for cfg in MARKETS:
+        t0 = time.perf_counter()
+        tsv_subdir = os.path.join(TSV_DIR, cfg.tsv_subdir)
+        files = collect_files(tsv_subdir)
+        if not files:
+            print(f"[{cfg.name}] No TSV files found in '{tsv_subdir}' — skipping.",
+                  file=sys.stderr)
+            continue
 
-    elapsed = time.perf_counter() - t0
-    print_stats(files, file_meta, len(episodes), dropped, elapsed, output_file)
+        all_rows: list[dict] = []
+        file_meta: list[dict] = []
+        for filepath in files:
+            rows, first_ts, last_ts = read_file_rows(filepath)
+            file_meta.append({
+                "name": filepath,
+                "first_ts": first_ts,
+                "last_ts": last_ts,
+                "episode_count": 0,
+            })
+            all_rows.extend(rows)
+
+        segments = segment_rows(all_rows, cfg.window_min)
+        segments = reassign_stray_close_rows(segments)
+        kept, dropped = filter_segments(segments)
+        episodes = annotate_cross_episode(
+            [annotate_segment(seg, cfg.window_min) for seg in kept],
+            cfg.window_min,
+        )
+
+        for ep in episodes:
+            ep_ts = ep["rows"][0]["timestamp"]
+            for meta in file_meta:
+                if meta["first_ts"] <= ep_ts <= meta["last_ts"]:
+                    meta["episode_count"] += 1
+                    break
+
+        output_file = os.path.join(OUTPUT_DIR, f"{cfg.output_prefix}_combined_{ts}.json")
+        with open(output_file, "w", encoding="utf-8") as f:
+            f.write(format_output(episodes))
+
+        elapsed = time.perf_counter() - t0
+        print_stats(files, file_meta, len(episodes), dropped, elapsed, output_file)
 
 
 if __name__ == "__main__":
