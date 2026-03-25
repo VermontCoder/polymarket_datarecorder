@@ -1,5 +1,5 @@
 """
-btc_polymarket_recorder.py
+polymarket_recorder.py
 --------------------------
 Records Polymarket order book data for multiple markets to tab-delimited files,
 polling every 2 seconds until stopped with Ctrl+C.
@@ -14,7 +14,7 @@ Output columns (per market):
     Current Price, Difference %, Difference $, Time to Close (ms)
 
 Usage:
-    python3 btc_polymarket_recorder.py
+    python3 polymarket_recorder.py
 """
 
 import urllib.request
@@ -22,13 +22,22 @@ import json
 import time
 import os
 import threading
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import rich.box
+from rich.console import Group
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+
 
 INTERVAL_SEC = 2
 TSV_DIR      = "tsv"
+DISPLAY_ROWS = 10
 
 COLUMNS = [
     "Timestamp",
@@ -79,6 +88,8 @@ MARKETS = [
     ),
 ]
 
+
+# ── Fetching ──────────────────────────────────────────────────────────────────
 
 def fetch_url(url: str):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -172,16 +183,81 @@ def collect_snapshot(cfg: MarketConfig) -> dict | None:
     }
 
 
+# ── Display ───────────────────────────────────────────────────────────────────
+
+def _make_market_panel(cfg: MarketConfig, rows: list[dict], output_file: str) -> Panel:
+    table = Table(
+        box=rich.box.SIMPLE_HEAD,
+        show_header=True,
+        header_style="bold",
+        padding=(0, 1),
+        expand=True,
+    )
+    table.add_column("Time (UTC)",  width=12)
+    table.add_column("Price",       justify="right", width=11)
+    table.add_column("Up B/A",      justify="center", width=9)
+    table.add_column("Dn B/A",      justify="center", width=9)
+    table.add_column("Diff %",      justify="right",  width=10)
+    table.add_column("TTC",         justify="right",  width=6)
+    table.add_column("ms",          justify="right",  width=5, style="dim")
+
+    for i, snap in enumerate(reversed(rows)):
+        row_style = "on grey15" if i == 0 else ""
+
+        if snap.get("is_error"):
+            table.add_row(
+                snap["timestamp"][11:23],
+                Text(snap.get("message", "error"), style="red"),
+                "", "", "", "", "",
+                style=row_style,
+            )
+            continue
+
+        ts    = snap["timestamp"][11:23]   # HH:MM:SS.mmm
+        price = f"{snap['current_price']:.2f}" if snap.get("current_price") is not None else "—"
+
+        ub = snap.get("up_bid");   ua = snap.get("up_ask")
+        db = snap.get("down_bid"); da = snap.get("down_ask")
+        up_ba = f"{ub:.0f}/{ua:.0f}" if ub is not None and ua is not None else "—/—"
+        dn_ba = f"{db:.0f}/{da:.0f}" if db is not None and da is not None else "—/—"
+
+        diff = snap.get("diff_pct")
+        diff_text = (Text(f"{diff:+.4f}%", style="green" if diff >= 0 else "red")
+                     if diff is not None else Text("—", style="dim"))
+
+        ttc     = int(snap.get("time_to_close") or 0) // 1000
+        elapsed = str(snap.get("elapsed_ms", "—"))
+
+        table.add_row(ts, price, up_ba, dn_ba, diff_text, f"{ttc}s", elapsed,
+                      style=row_style)
+
+    if not rows:
+        table.add_row(Text("waiting…", style="dim"), "", "", "", "", "", "")
+
+    subtitle = Text(os.path.basename(output_file), style="dim")
+    return Panel(table, title=f"[bold]{cfg.name}[/bold]", subtitle=subtitle,
+                 border_style="cyan")
+
+
+def _make_display(market_buffers: dict[str, deque],
+                  market_files:   dict[str, str]) -> Group:
+    return Group(*[
+        _make_market_panel(cfg, list(market_buffers[cfg.name]), market_files[cfg.name])
+        for cfg in MARKETS
+    ])
+
+
+# ── Poll loop ─────────────────────────────────────────────────────────────────
+
 def fmt(val, decimals=2) -> str:
     if val is None:
         return ""
     return f"{val:.{decimals}f}"
 
 
-def run_market(cfg: MarketConfig, output_file: str):
+def run_market(cfg: MarketConfig, output_file: str, buffer: deque):
     """Poll loop for one market — runs until _stop is set."""
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    print(f"[{cfg.name}] Recording to: {output_file}")
 
     write_header = not os.path.exists(output_file)
     with open(output_file, "a", newline="") as f:
@@ -190,11 +266,14 @@ def run_market(cfg: MarketConfig, output_file: str):
 
         while not _stop.is_set():
             t0 = time.perf_counter()
+            now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
             try:
                 snap = collect_snapshot(cfg)
                 if snap is None:
-                    print(f"[{cfg.name}] No market found — retrying...")
+                    buffer.append({"is_error": True, "timestamp": now_ts,
+                                   "message": "no market found"})
                 else:
+                    snap["elapsed_ms"] = int((time.perf_counter() - t0) * 1000)
                     row = "\t".join([
                         snap["timestamp"],
                         fmt(snap["up_bid"]),
@@ -209,43 +288,49 @@ def run_market(cfg: MarketConfig, output_file: str):
                     ])
                     f.write(row + "\n")
                     f.flush()
-                    elapsed = (time.perf_counter() - t0) * 1000
-                    print(f"[{cfg.name}] [{snap['timestamp']}]  "
-                          f"{cfg.asset_label} ${fmt(snap['current_price'], 2)}  "
-                          f"Up {fmt(snap['up_bid'], 0)}¢/{fmt(snap['up_ask'], 0)}¢  "
-                          f"Down {fmt(snap['down_bid'], 0)}¢/{fmt(snap['down_ask'], 0)}¢  "
-                          f"Diff {fmt(snap['diff_pct'], 6)}%  "
-                          f"TTC {int(snap['time_to_close'] or 0) // 1000}s  "
-                          f"({elapsed:.0f}ms)")
+                    buffer.append(snap)
             except Exception as e:
-                print(f"[{cfg.name}] Error: {e}")
+                buffer.append({"is_error": True, "timestamp": now_ts,
+                               "message": str(e)})
 
             elapsed = time.perf_counter() - t0
             _stop.wait(timeout=max(0.0, INTERVAL_SEC - elapsed))
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 def main():
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    print("Starting recorders:")
-    threads = []
+    market_files:   dict[str, str]   = {}
+    market_buffers: dict[str, deque] = {}
+    threads: list[threading.Thread]  = []
+
     for cfg in MARKETS:
         out = os.path.join(TSV_DIR, cfg.output_dir, f"{cfg.slug_prefix}_{ts}.tsv")
-        t = threading.Thread(target=run_market, args=(cfg, out), daemon=True, name=cfg.name)
+        market_files[cfg.name]   = out
+        market_buffers[cfg.name] = deque(maxlen=DISPLAY_ROWS)
+        t = threading.Thread(target=run_market,
+                             args=(cfg, out, market_buffers[cfg.name]),
+                             daemon=True, name=cfg.name)
         threads.append(t)
 
     for t in threads:
         t.start()
 
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nStopping...")
-        _stop.set()
-        for t in threads:
-            t.join(timeout=5)
-        print("Stopped.")
+    with Live(_make_display(market_buffers, market_files),
+              refresh_per_second=4, auto_refresh=False) as live:
+        try:
+            while True:
+                live.update(_make_display(market_buffers, market_files))
+                live.refresh()
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            _stop.set()
+
+    for t in threads:
+        t.join(timeout=5)
+    print("Stopped.")
 
 
 if __name__ == "__main__":
