@@ -6,6 +6,7 @@ for reinforcement learning training.
 
 Supported markets:
   - BTC 15-minute  (tsv/btc-15/ → data/btc_15_combined_*.json)
+  - BTC 5-minute   (tsv/btc-5/  → data/btc_5_combined_*.json)
   - ETH 15-minute  (tsv/eth-15/ → data/eth_15_combined_*.json)
   - ETH 5-minute   (tsv/eth-5/  → data/eth_5_combined_*.json)
 
@@ -42,6 +43,7 @@ class MarketConfig:
 
 MARKETS = [
     MarketConfig(name="BTC-15m", tsv_subdir="btc-15", window_min=15, output_prefix="btc_15"),
+    MarketConfig(name="BTC-5m",  tsv_subdir="btc-5",  window_min=5,  output_prefix="btc_5"),
     MarketConfig(name="ETH-15m", tsv_subdir="eth-15", window_min=15, output_prefix="eth_15"),
     MarketConfig(name="ETH-5m",  tsv_subdir="eth-5",  window_min=5,  output_prefix="eth_5"),
 ]

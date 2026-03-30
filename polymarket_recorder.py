@@ -6,6 +6,7 @@ polling every 2 seconds until stopped with Ctrl+C.
 
 Markets tracked:
   - BTC 15-minute  (tsv/btc-15/)
+  - BTC 5-minute   (tsv/btc-5/)
   - ETH 15-minute  (tsv/eth-15/)
   - ETH 5-minute   (tsv/eth-5/)
 
@@ -69,6 +70,14 @@ MARKETS = [
         binance_symbol="BTCUSDT",
         asset_label="BTC",
         output_dir="btc-15",
+    ),
+    MarketConfig(
+        name="BTC-5m",
+        slug_prefix="btc-updown-5m",
+        window_sec=300,
+        binance_symbol="BTCUSDT",
+        asset_label="BTC",
+        output_dir="btc-5",
     ),
     MarketConfig(
         name="ETH-15m",
